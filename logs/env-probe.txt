@@ -1,0 +1,26 @@
+InstaBox main-1 environment probe — 2026-11-08
+Machine ID: m_agqyqiykhhc2xqyinwogy3t7aq (name main-1, free plan, 4 vCPU / 8 GiB / 20 GiB /data)
+State before: suspended (autoSuspendedAt 2026-11-07T08:11:44Z); exec woke it successfully.
+
+uname: Linux instabox-main-1 6.18.54-instabox #1 SMP PREEMPT_DYNAMIC 2026-09-25 x86_64 GNU/Linux
+OS (guest): Debian GNU/Linux 13 (trixie), 13.7
+nproc: 4
+free: Mem 7.8 Gi total, ~7.2 Gi available at probe; Swap 0
+df: / (/dev/root) 16G, 11G avail at probe; /data (/dev/vdb) 20G, 20G avail (382M used)
+guest user: uid=1000(user), groups sudo + docker; passwordless sudo verified (sudo -n true => sudo-ok)
+Docker: Docker version 29.8.2, build 7fc2dff; docker ps works (no containers running)
+/dev/kvm: DOES NOT EXIST — QEMU must run in pure emulation (TCG), slow but usable.
+/dev/loop: losetup present (/usr/sbin/losetup), `sudo losetup -f` returned /dev/loop0 (loop usable)
+
+Initially missing, installed via apt (sudo apt-get update + install, log on machine /data/home/logs/apt-install.log, completed successfully):
+  qemu-system-x86 1:10.0.13+ds-0+deb13u1 (qemu-system-x86_64 verified)
+  xorriso 1.5.6, squashfs-tools (mksquashfs 4.6.1), mmdebstrap 1.5.7, debootstrap
+  parted 3.6 (/usr/sbin/parted — /usr/sbin is not in guest PATH, use full paths), dosfstools, mtools
+  syslinux, isolinux (/usr/lib/ISOLINUX/isolinux.bin, isohdpfx.bin), grub-efi-amd64-bin, grub-pc-bin (/usr/lib/grub/x86_64-efi/), grub-mkstandalone
+  util-linux, fdisk (/usr/sbin/fdisk), gdisk (/usr/sbin/sgdisk), wget, p7zip-full, genisoimage
+  ovmf (/usr/share/OVMF/OVMF_CODE_4M.fd + VARS), seabios (/usr/share/seabios/bios-256k.bin)
+Pre-existing: git, gcc, make, python3, curl, unzip
+
+Machine internet: verified — curl -I https://github.com => HTTP/2 200; GitHub API reachable (Ventoy latest release v1.1.18 at probe time).
+
+Red line honoured: no proxy/VPN installed or run, no ports published. Build + QEMU only.

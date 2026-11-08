@@ -1,0 +1,75 @@
+name: build-ai-rescue-pe
+
+# Builds AI-Rescue-PE.iso on InstaBox's GitHub App runners
+# (runs-on: instabox-medium = fresh 4 vCPU / 8 GiB machine, free plan OK,
+# does not consume GitHub-hosted minutes). Install the InstaBox GitHub App
+# on this repository first (see README > CI).
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: instabox-medium
+    timeout-minutes: 150
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          set -e
+          SUDO=""
+          if [ "$(id -u)" != "0" ]; then SUDO="sudo"; fi
+          $SUDO apt-get update
+          $SUDO apt-get install -y --no-install-recommends \
+            mmdebstrap debootstrap squashfs-tools xorriso isolinux syslinux-common \
+            grub-efi-amd64-bin grub-pc-bin qemu-system-x86 ovmf \
+            parted dosfstools mtools gdisk fdisk util-linux \
+            wget curl unzip p7zip-full genisoimage git ca-certificates
+
+      - name: Download the official Ventoy release (USB image base, checksum-verified)
+        run: |
+          set -e
+          mkdir -p .work/ventoy
+          curl -sL -o .work/ventoy/ventoy-1.1.18-linux.tar.gz \
+            https://github.com/ventoy/Ventoy/releases/download/v1.1.18/ventoy-1.1.18-linux.tar.gz
+          echo "d86ff9de63d94c8b8f1f6b14d23c55af4b88e8207bf2893890892a6a97b1ad54  .work/ventoy/ventoy-1.1.18-linux.tar.gz" | sha256sum -c -
+
+      - name: Stage the PE sources where build-pe.sh expects them
+        run: |
+          set -e
+          mkdir -p .work/files
+          cp pe/ai-debug/ai-debug .work/files/
+          cp pe/rescue-agent/rescue-agent.py pe/rescue-agent/rescue-boot.sh .work/files/
+          cp pe/rescue-agent/agent.conf.example .work/files/
+          cp pe/systemd/rescue-agent.service pe/systemd/rescue-setup.service \
+             pe/systemd/10-wired-dhcp.network .work/files/
+
+      - name: Build AI-Rescue-PE.iso
+        run: |
+          set -e
+          mkdir -p dist logs
+          export WORK="$PWD/.work/pe" SRC="$PWD/.work/files" OUT="$PWD/dist/AI-Rescue-PE.iso"
+          SUDO=""
+          if [ "$(id -u)" != "0" ]; then SUDO="sudo"; fi
+          # mmdebstrap (root mode) + chroot configuration need root.
+          $SUDO env WORK="$WORK" SRC="$SRC" OUT="$OUT" PATH="$PATH" \
+            bash build/build-pe.sh 2>&1 | tee logs/build-pe.log
+          sha256sum dist/AI-Rescue-PE.iso | tee dist/AI-Rescue-PE.iso.sha256
+          ls -lh dist/
+
+      - name: QEMU smoke test (TCG emulation, time-boxed)
+        run: |
+          bash build/qemu-smoke-ci.sh dist/AI-Rescue-PE.iso logs/qemu-smoke-serial.log 600
+
+      - name: Upload ISO and logs as workflow artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-rescue-pe-${{ github.run_number }}
+          path: |
+            dist/
+            logs/
+          if-no-files-found: warn
+          retention-days: 14

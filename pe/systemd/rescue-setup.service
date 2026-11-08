@@ -1,0 +1,12 @@
+[Unit]
+Description=AI-Rescue-PE boot setup (token password, banner, reverse tunnel)
+After=rescue-agent.service network-online.target ssh.service avahi-daemon.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/rescue-boot
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

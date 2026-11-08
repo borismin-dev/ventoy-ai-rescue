@@ -1,0 +1,24 @@
+# rescue-config/agent.conf  -  example
+# Put this file in a folder named  rescue-config  in the ROOT of your Ventoy
+# USB data partition. AI-Rescue-PE reads it automatically at boot.
+# This file lives only on your own USB stick. Never commit a filled-in copy
+# (it may contain an API key) to any git repository.
+
+# --- LLM for ai-debug (OpenAI-compatible API) - optional ---
+# AI_API_BASE=https://api.openai.com/v1
+# AI_API_KEY=
+# AI_MODEL=gpt-4o-mini
+
+# --- Outbound reverse tunnel via YOUR OWN relay server - optional ---
+# When TUNNEL_HOST is set, the PE opens  ssh -R  at boot so agents outside
+# the LAN can reach it through your relay:
+#   relay:18734 -> PE:8734 (agent API) , relay:10022 -> PE:22 (SSH)
+# TUNNEL_HOST=relay.example.com
+# TUNNEL_USER=root
+# TUNNEL_PORT=22
+# TUNNEL_REMOTE_API_PORT=18734
+# TUNNEL_REMOTE_SSH_PORT=10022
+# TUNNEL_KEY=tunnel_key
+# (place the private key file named above next to this agent.conf;
+#  the relay account must accept key auth - the boot token cannot be typed
+#  interactively into the tunnel login)

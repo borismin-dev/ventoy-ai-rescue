@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+"""ai-debug - AI 调试维护工具 (AI-Rescue-PE)
+Modes:
+  ai-debug diagnose [--llm]   Offline rule-based diagnosis + optional LLM summary
+  ai-debug ask "question"     Ask LLM (OpenAI-compatible API via env)
+  ai-debug setup-local-model  Download llama.cpp + small GGUF to /opt (online, on demand)
+Env for LLM:
+  AI_API_BASE  e.g. https://api.openai.com/v1  (default)
+  AI_API_KEY   API key (never baked into ISO)
+  AI_MODEL     e.g. gpt-4o-mini (default)
+"""
+import os, sys, subprocess, json, platform, shutil, urllib.request, urllib.error
+from datetime import datetime
+
+def run(cmd, timeout=15):
+    try:
+        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+        return (r.stdout + r.stderr).strip()
+    except Exception as e:
+        return f"(failed: {e})"
+
+def collect():
+    d = {}
+    d['time'] = datetime.now().isoformat()
+    d['uname'] = run("uname -a")
+    d['os'] = run("cat /etc/os-release 2>/dev/null | head -5")
+    d['uptime'] = run("uptime")
+    d['cpu'] = run("nproc; grep -m1 'model name' /proc/cpuinfo")
+    d['mem'] = run("free -h")
+    d['disk_space'] = run("df -h -x tmpfs -x devtmpfs 2>/dev/null")
+    d['lsblk'] = run("lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,MODEL 2>/dev/null || lsblk")
+    d['blkid'] = run("blkid 2>/dev/null; sudo -n blkid 2>/dev/null")
+    d['dmesg_critical'] = run("dmesg 2>/dev/null | grep -iE 'error|fail|panic|oops|I/O error|EXT4-fs error|critical' | tail -40")
+    d['smart'] = collect_smart()
+    d['network'] = run("ip -brief a 2>/dev/null; echo ---; ip route 2>/dev/null; echo ---; cat /etc/resolv.conf 2>/dev/null")
+    d['systemd_failed'] = run("systemctl --failed --no-pager 2>/dev/null || echo 'systemd not running (live system)'")
+    d['mem_test_hint'] = run("grep -E 'MemTotal|MemAvailable' /proc/meminfo")
+    return d
+
+def collect_smart():
+    out = []
+    if not shutil.which("smartctl"):
+        return "smartctl not installed"
+    disks = run("lsblk -dn -o NAME,TYPE | awk '$2==\"disk\"{print $1}'").split()
+    for disk in disks[:4]:
+        out.append(f"--- /dev/{disk} ---")
+        out.append(run(f"smartctl -H -A /dev/{disk} 2>/dev/null | grep -E 'SMART overall|Reallocated|Pending|Uncorrectable|Temperature|Power_On' | head -20"))
+    return "\n".join(out) if out else "no disks enumerated"
+
+def diagnose_rules(d):
+    findings = []  # (level, title, detail, advice)
+    # disk space
+    for line in d['disk_space'].splitlines()[1:]:
+        parts = line.split()
+        if len(parts) >= 5 and parts[4].endswith('%'):
+            try:
+                pct = int(parts[4].rstrip('%'))
+                if pct >= 95:
+                    findings.append(("CRITICAL", f"Filesystem nearly full: {parts[0]} {parts[4]}", line, "Free space: clear logs/cache, resize, or move data. Check: du -xh / | sort -h | tail"))
+                elif pct >= 85:
+                    findings.append(("WARN", f"Filesystem filling up: {parts[0]} {parts[4]}", line, "Plan cleanup before it hits 100%."))
+            except Exception:
+                pass
+    if 'I/O error' in d['dmesg_critical'] or 'EXT4-fs error' in d['dmesg_critical']:
+        findings.append(("CRITICAL", "Kernel reports storage I/O / filesystem errors", d['dmesg_critical'][:800], "Back up data FIRST. Check SMART, cables, run fsck from rescue media (filesystem unmounted)."))
+    if 'panic' in d['dmesg_critical'].lower() or 'oops' in d['dmesg_critical'].lower():
+        findings.append(("CRITICAL", "Kernel panic/oops traces in dmesg", d['dmesg_critical'][:800], "Note the driver/module in the trace; test RAM with memtester/memtest86+; check recent kernel/driver changes."))
+    if not d['dmesg_critical']:
+        findings.append(("OK", "No critical kernel errors found in dmesg scan", "", ""))
+    # SMART
+    if 'FAILED' in d['smart']:
+        findings.append(("CRITICAL", "SMART health FAILED on a disk", d['smart'][:600], "Replace the disk immediately after backing up. Do not run stress tests on it."))
+    elif 'Reallocated' in d['smart']:
+        findings.append(("INFO", "SMART attributes collected (check reallocated/pending counts manually)", d['smart'][:600], "Reallocated_Sector_Ct or Current_Pending_Sector > 0 means the disk is degrading."))
+    # memory pressure
+    mem = d['mem']
+    if 'Mem:' in mem:
+        findings.append(("INFO", "Memory snapshot collected", mem.splitlines()[1] if len(mem.splitlines())>1 else mem, "If available memory is near zero with heavy swap, suspect a leak or undersized RAM; run memtester for hardware faults."))
+    # systemd
+    if d['systemd_failed'] and '0 loaded units' not in d['systemd_failed'] and 'not running' not in d['systemd_failed']:
+        # crude: lines with failed
+        if 'failed' in d['systemd_failed'].lower():
+            findings.append(("WARN", "systemd has failed units", d['systemd_failed'][:600], "Inspect: systemctl status <unit>; journalctl -xeu <unit>"))
+    # network
+    if 'default' not in d['network']:
+        findings.append(("WARN", "No default route found", "", "Check cable/Wi-Fi, DHCP (dhclient/dhcpcd), and ip route. Offline AI diagnosis still works without network."))
+    else:
+        findings.append(("OK", "Default route present", "", ""))
+    if not findings:
+        findings.append(("OK", "No issues matched by the rule engine", "", "Run a full SMART long test and memtester for deeper checks."))
+    return findings
+
+def render(d, findings):
+    lines = []
+    lines.append("="*70)
+    lines.append("AI-Rescue-PE  ai-debug diagnose report")
+    lines.append(f"Time: {d['time']}  Host: {platform.node()}  Kernel: {d['uname']}")
+    lines.append("="*70)
+    lines.append("\n[Findings - rule engine]")
+    for lvl, title, detail, advice in findings:
+        lines.append(f"- [{lvl}] {title}")
+        if detail:
+            lines.append(f"    evidence: {detail[:500]}")
+        if advice:
+            lines.append(f"    advice: {advice}")
+    lines.append("\n[System]")
+    lines.append(d['os']); lines.append(d['uptime']); lines.append(d['cpu']); lines.append(d['mem_test_hint'])
+    lines.append("\n[Disk space]\n" + d['disk_space'])
+    lines.append("\n[Block devices]\n" + d['lsblk'] + "\n" + d['blkid'])
+    lines.append("\n[SMART]\n" + d['smart'])
+    lines.append("\n[Network]\n" + d['network'])
+    lines.append("\n[systemd failed]\n" + d['systemd_failed'])
+    lines.append("\n[dmesg critical - tail]\n" + (d['dmesg_critical'] or "(none)"))
+    lines.append("\n" + "="*70)
+    lines.append("Common boot-failure checklist:")
+    lines.append(" 1. GRUB error / no bootable device -> check EFI/BIOS mode, ESP, grub reinstall from rescue")
+    lines.append(" 2. initramfs drops to shell -> check root UUID in fstab/grub.cfg vs blkid")
+    lines.append(" 3. Windows no-boot -> ntfsfix (check only), chntpw for password reset, testdisk for partition loss")
+    lines.append(" 4. Data loss -> STOP writing to the disk; image it with ddrescue first, then photorec/testdisk on the image")
+    lines.append("="*70)
+    return "\n".join(lines)
+
+def llm_chat(prompt):
+    base = os.environ.get("AI_API_BASE", "https://api.openai.com/v1").rstrip("/")
+    key = os.environ.get("AI_API_KEY", "")
+    model = os.environ.get("AI_MODEL", "gpt-4o-mini")
+    if not key:
+        return ("[ai-debug] No AI_API_KEY set. Configure an OpenAI-compatible endpoint first:\n"
+                "  export AI_API_BASE=https://api.openai.com/v1\n"
+                "  export AI_API_KEY=sk-...\n"
+                "  export AI_MODEL=gpt-4o-mini\n"
+                "Then re-run. Offline `ai-debug diagnose` works without a key.")
+    payload = json.dumps({"model": model, "messages": [
+        {"role": "system", "content": "You are a system-rescue debugging assistant inside a Linux live PE. Be concrete, give commands, warn before destructive steps."},
+        {"role": "user", "content": prompt}]}).encode()
+    req = urllib.request.Request(base + "/chat/completions", data=payload,
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            data = json.loads(r.read().decode())
+            return data["choices"][0]["message"]["content"]
+    except Exception as e:
+        return f"[ai-debug] LLM request failed: {e}"
+
+def setup_local():
+    script = r'''#!/bin/bash
+set -e
+echo "This downloads llama.cpp release + a small GGUF model (Qwen2.5-0.5B-Instruct, ~400MB) to /opt/ai-local"
+echo "Requires network. Nothing is downloaded by default in the ISO to keep it small."
+sudo mkdir -p /opt/ai-local && cd /opt/ai-local
+if [ ! -f llama-cli ]; then
+  curl -L -o llama.zip https://github.com/ggml-org/llama.cpp/releases/download/b4380/llama-b4380-bin-ubuntu-x64.zip || { echo download failed; exit 1; }
+  unzip -o llama.zip; cp build/bin/llama-cli . 2>/dev/null || find . -name llama-cli -exec cp {} . \;
+fi
+if [ ! -f model.gguf ]; then
+  curl -L -o model.gguf https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf
+fi
+echo "Done. Run: /opt/ai-local/llama-cli -m /opt/ai-local/model.gguf -p 'your question' -n 256"
+'''
+    path = "/usr/local/bin/ai-debug-setup-local-model"
+    try:
+        with open(path, "w") as f: f.write(script)
+        os.chmod(path, 0o755)
+        print(f"Wrote {path} - run it (with network) to install the local model.")
+    except PermissionError:
+        with open("./ai-debug-setup-local-model", "w") as f: f.write(script)
+        os.chmod("./ai-debug-setup-local-model", 0o755)
+        print("No permission for /usr/local/bin; wrote ./ai-debug-setup-local-model instead (run with sudo to install system-wide).")
+    print(script)
+
+def main():
+    if len(sys.argv) < 2:
+        print(__doc__); return
+    cmd = sys.argv[1]
+    if cmd == "diagnose":
+        d = collect(); findings = diagnose_rules(d); report = render(d, findings)
+        print(report)
+        try:
+            with open("/tmp/ai-report.txt", "w") as f: f.write(report)
+            print("\n[ai-debug] Report also written to /tmp/ai-report.txt")
+        except Exception as e:
+            print(f"[ai-debug] could not write /tmp/ai-report.txt: {e}")
+        if "--llm" in sys.argv:
+            print("\n[LLM analysis]\n" + llm_chat("Diagnose this rescue report and give prioritised fix steps:\n" + report[:8000]))
+    elif cmd == "ask":
+        q = " ".join(sys.argv[2:]) or "How do I check disk health?"
+        print(llm_chat(q))
+    elif cmd == "setup-local-model":
+        setup_local()
+    else:
+        print(__doc__)
+
+if __name__ == "__main__":
+    main()

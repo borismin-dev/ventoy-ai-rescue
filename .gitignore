@@ -1,0 +1,25 @@
+# Secrets — never commit
+SECRETS*.json
+*SECRETS*.json
+*.key
+*.pem
+
+# Build products / large binaries (delivered out-of-band, checksums in docs)
+dist/*
+!dist/MANIFEST.md
+*.iso
+*.img
+*.wim
+*.exe
+*.zip
+*.tar.gz
+*.tar.xz
+*.png
+
+# Raw run logs may contain per-boot agent tokens; curated docs live in docs/
+logs/*
+!logs/env-probe.txt
+
+# Machine-side staging
+.work/
+__pycache__/

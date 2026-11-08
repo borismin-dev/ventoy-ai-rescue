@@ -1,0 +1,13 @@
+[Unit]
+Description=AI-Rescue-PE maintenance agent API (port 8734)
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/rescue-agent
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
