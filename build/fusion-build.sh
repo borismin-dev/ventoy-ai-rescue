@@ -37,7 +37,8 @@ set -x
 W=${W:-/data/home/build/winpe}
 SRCWIM=$W/hotpe/HotPE/Boot.wim
 ORIGISO=$W/dl/HotPE-V2.8.251018.iso
-WORK=$W/fusion-v4
+WORK=${WORK_DIR:-$W/fusion-v4}
+OUT_ISO=${OUT_ISO:-/data/home/dist/HotPE-Fusion-AIRescue.iso}
 LIMIT=670543552
 WIM_OFFSET_SEEK=2588   # 10600448 / 4096
 mkdir -p $WORK/extras
@@ -56,9 +57,18 @@ wimlib-imagex extract $SRCWIM 1 'Windows/Web/Wallpaper/HotPE/(1).jpg' --dest-dir
 cp -r "$W/wepe/Program Files/Everything" $WORK/extras/Everything || exit 2
 cp -r "$W/wepe/Program Files/Wimtool"    $WORK/extras/Wimtool    || exit 2
 
+# v2 additions: ai-debug alias shim for the Windows PE + a desktop
+# reopen entry (the agent lives in a console window; closing it stops
+# the service, so the desktop gets a one-click way back). Injected into
+# both Default and Public desktops - whichever the HotPE shell shows.
+printf '@echo off\r\nstart ai-rescue.exe agent\r\n' > $WORK/extras/reopen-agent.cmd
+
 # wimlib update: multiple commands go on standard input.
 wimlib-imagex update $WORK/BootF.wim 1 <<EOF || exit 3
 add $W/ai-rescue.exe /Windows/System32/ai-rescue.exe
+add $W/ai-debug.cmd /Windows/System32/ai-debug.cmd
+add $WORK/extras/reopen-agent.cmd /Users/Default/Desktop/AI维护-重开.cmd
+add $WORK/extras/reopen-agent.cmd /Users/Public/Desktop/AI维护-重开.cmd
 delete /Windows/Pecmd.ini
 add $WORK/Pecmd.ini /Windows/Pecmd.ini
 add $WORK/extras/Everything /ExtraTools/Everything
@@ -74,8 +84,8 @@ echo "SIZE=$SZ LIMIT=$LIMIT"
 
 # Pad to exactly the original WIM length and splice into a copy of the ISO.
 truncate -s $LIMIT $WORK/BootF.wim || exit 6
-cp $ORIGISO /data/home/dist/HotPE-Fusion-AIRescue.iso || exit 7
-dd if=$WORK/BootF.wim of=/data/home/dist/HotPE-Fusion-AIRescue.iso \
+cp $ORIGISO "$OUT_ISO" || exit 7
+dd if=$WORK/BootF.wim of="$OUT_ISO" \
    bs=4096 seek=$WIM_OFFSET_SEEK conv=notrunc || exit 8
-sha256sum /data/home/dist/HotPE-Fusion-AIRescue.iso
+sha256sum "$OUT_ISO"
 echo FUSION-DONE

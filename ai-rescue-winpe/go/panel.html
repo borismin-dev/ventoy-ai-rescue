@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI-Rescue 维护面板（只读）</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+         background: #f4f6f8; color: #1c2733; }
+  header { background: #14406b; color: #fff; padding: 14px 16px; }
+  header h1 { margin: 0 0 6px; font-size: 20px; }
+  header .ro { background: #f5a623; color: #222; border-radius: 4px; padding: 1px 7px;
+               font-size: 13px; vertical-align: middle; }
+  header .line { font-size: 13px; opacity: .92; word-break: break-all; }
+  .badge { display: inline-block; margin-top: 6px; padding: 2px 10px; border-radius: 10px;
+           font-size: 13px; background: #666; color: #fff; }
+  .badge.ok { background: #1d9d55; }
+  .badge.bad { background: #c0392b; }
+  main { max-width: 860px; margin: 0 auto; padding: 14px; }
+  section { background: #fff; border-radius: 8px; padding: 14px 16px; margin-bottom: 14px;
+            box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+  h2 { margin: 0 0 10px; font-size: 17px; }
+  h3 { margin: 14px 0 6px; font-size: 15px; color: #14406b; }
+  p { margin: 4px 0; }
+  .disk { padding: 4px 0; border-bottom: 1px dashed #e2e8ee; font-size: 14px; }
+  .disk:last-child { border-bottom: none; }
+  .vol { margin: 8px 0; }
+  .vol-h { display: flex; justify-content: space-between; font-size: 13px; gap: 8px;
+           flex-wrap: wrap; }
+  .bar { height: 10px; background: #e6ecf1; border-radius: 5px; overflow: hidden; margin-top: 3px; }
+  .fill { height: 100%; background: #2f80ed; }
+  .fill.hot { background: #c0392b; }
+  button { background: #14406b; color: #fff; border: 0; border-radius: 6px;
+           padding: 9px 18px; font-size: 15px; cursor: pointer; }
+  button:active { opacity: .8; }
+  .card { border-left: 5px solid #999; background: #fafbfc; border-radius: 4px;
+          padding: 8px 10px; margin: 8px 0; font-size: 14px; }
+  .card .det { color: #555; font-size: 13px; margin-top: 3px; white-space: pre-wrap;
+               word-break: break-all; }
+  .card .adv { color: #14406b; font-size: 13px; margin-top: 3px; }
+  .lvl-CRITICAL { border-left-color: #c0392b; }
+  .lvl-WARN { border-left-color: #f5a623; }
+  .lvl-INFO { border-left-color: #2f80ed; }
+  .lvl-OK { border-left-color: #1d9d55; }
+  details { margin-top: 10px; }
+  pre { background: #0e1a26; color: #d7e3ee; padding: 10px; border-radius: 6px;
+        overflow: auto; font-size: 12px; max-height: 55vh; }
+  footer { max-width: 860px; margin: 0 auto; padding: 0 14px 18px; font-size: 12px; color: #667; }
+</style>
+</head>
+<body>
+<header>
+  <h1>AI-Rescue 维护面板 <span class="ro">只读</span></h1>
+  <div class="line">本机地址：<span id="addr">…</span></div>
+  <span id="auth-badge" class="badge">令牌验证中…</span>
+</header>
+<main>
+  <section id="sec-overview">
+    <h2>状态总览</h2>
+    <div id="ov-host"><p>正在读取 /info …</p></div>
+    <div id="ov-mem"></div>
+    <h3>物理盘 / SMART</h3>
+    <div id="ov-disks"><p>—</p></div>
+    <h3>卷容量</h3>
+    <div id="ov-vols"><p>—</p></div>
+  </section>
+  <section id="sec-diag">
+    <h2>诊断报告</h2>
+    <p>诊断是只读采集，点击后拉取并渲染最近一次完整诊断。</p>
+    <button id="btn-diag" type="button">查看诊断</button>
+    <div id="findings"></div>
+    <details id="raw-wrap">
+      <summary>报告原文</summary>
+      <pre id="raw-report"></pre>
+    </details>
+  </section>
+</main>
+<footer>只读面板：本页面只展示状态与诊断报告，没有任何操作入口。清理、修复等维护动作由 AI 通过受令牌保护的接口执行，不经过本页面。</footer>
+<script>
+"use strict";
+const token = new URLSearchParams(location.search).get("token") || "";
+const $ = (id) => document.getElementById(id);
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function gib(b) { return (b == null || isNaN(b)) ? "—" : (b / 1073741824).toFixed(1) + " GiB"; }
+async function getJSON(path) {
+  const r = await fetch(path + (path.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(token));
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  return r.json();
+}
+function renderDisks(info) {
+  let html = "";
+  if (Array.isArray(info.smart) && info.smart.length) {
+    html = info.smart.map((s) =>
+      '<div class="disk">' + esc(s.device || "") + " " + esc(s.model || "") +
+      " — SMART：" + esc(s.verdict || "未知") + "</div>").join("");
+  } else if (Array.isArray(info.disks) && info.disks.length) {
+    html = info.disks.map((d) =>
+      '<div class="disk">' + esc(d.model || "disk") + " — 状态：" +
+      esc(d.status || "未知") + "</div>").join("");
+  } else if (info.disks && Array.isArray(info.disks.blockdevices)) {
+    html = info.disks.blockdevices.filter((d) => d.type === "disk").map((d) =>
+      '<div class="disk">' + esc(d.name) + " " + esc(d.model || "") + " " +
+      esc(d.size || "") + "</div>").join("");
+  }
+  $("ov-disks").innerHTML = html || "<p>未取得物理盘信息</p>";
+}
+function renderVols(info) {
+  const vols = info.volumes || [];
+  $("ov-vols").innerHTML = vols.length ? vols.map((v) => {
+    const name = v.root || v.mount || "?";
+    const total = v.total || 0, free = v.free || 0;
+    const pct = total ? Math.round((total - free) * 100 / total) : 0;
+    return '<div class="vol"><div class="vol-h"><span>' + esc(name) + "</span><span>已用 " +
+      gib(total - free) + " / " + gib(total) + "（剩余 " + gib(free) + "）</span></div>" +
+      '<div class="bar"><div class="fill' + (pct >= 95 ? " hot" : "") +
+      '" style="width:' + pct + '%"></div></div></div>';
+  }).join("") : "<p>未取得卷信息</p>";
+}
+async function loadInfo() {
+  try {
+    const info = await getJSON("/info");
+    $("auth-badge").textContent = "令牌已验证";
+    $("auth-badge").className = "badge ok";
+    const ips = Array.isArray(info.ipv4) ? info.ipv4 : [];
+    $("addr").textContent = location.host + (ips.length ? " ｜ " + ips.join("，") : "");
+    $("ov-host").innerHTML = "<p>主机名：<b>" + esc(info.hostname || "—") + "</b> ｜ 系统：" +
+      esc(info.os || "Linux PE") + " ｜ agent " + esc(info.agent_version || "") + "</p>";
+    const m = info.memory;
+    $("ov-mem").innerHTML = m ? "<p>内存：总量 " + gib(m.total) + " ｜ 可用 " + gib(m.avail) +
+      (m.load_pct != null ? " ｜ 负载 " + m.load_pct + "%" : "") + "</p>" : "";
+    renderDisks(info);
+    renderVols(info);
+  } catch (e) {
+    $("auth-badge").textContent = "令牌验证失败（" + e.message + "）";
+    $("auth-badge").className = "badge bad";
+    $("ov-host").innerHTML = "<p>无法读取状态：" + esc(e.message) + "</p>";
+  }
+}
+function parseFindings(report) {
+  const out = [];
+  let inF = false;
+  for (const line of String(report || "").split("\n")) {
+    if (line.startsWith("[Findings")) { inF = true; continue; }
+    if (inF && line.startsWith("[")) break;
+    if (inF) {
+      const mm = line.match(/^-\s*\[(CRITICAL|WARN|INFO|OK)\]\s*(.*)$/);
+      if (mm) out.push({ level: mm[1], title: mm[2] });
+    }
+  }
+  return out;
+}
+$("btn-diag").addEventListener("click", async () => {
+  $("findings").innerHTML = "<p>正在采集诊断（只读）…</p>";
+  try {
+    const d = await getJSON("/diagnose");
+    const findings = (d.findings && d.findings.length) ? d.findings : parseFindings(d.report);
+    $("findings").innerHTML = findings.length ? findings.map((f) =>
+      '<div class="card lvl-' + esc(f.level) + '"><b>' + esc(f.level) + "</b> " + esc(f.title) +
+      (f.detail ? '<div class="det">' + esc(f.detail) + "</div>" : "") +
+      (f.advice ? '<div class="adv">' + esc(f.advice) + "</div>" : "") + "</div>").join("")
+      : "<p>本次诊断没有 findings</p>";
+    $("raw-report").textContent = d.report || "";
+  } catch (e) {
+    $("findings").innerHTML = "<p>诊断拉取失败：" + esc(e.message) + "</p>";
+  }
+});
+loadInfo();
+</script>
+</body>
+</html>

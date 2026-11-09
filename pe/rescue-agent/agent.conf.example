@@ -9,6 +9,15 @@
 # AI_API_KEY=
 # AI_MODEL=gpt-4o-mini
 
+# --- Fixed agent token - optional ---
+# By default the maintenance-agent token is random at every boot/agent
+# start and is shown only on the PE console. If other agents (Hermes
+# etc.) drive this PE and you want to configure them once, set a fixed
+# token here (minimum 8 characters). Treat it like a password: anyone
+# holding it can run commands on the booted machine. Leave unset to
+# keep the random-per-boot behaviour.
+# RESCUE_TOKEN=example-token-0000
+
 # --- Outbound reverse tunnel via YOUR OWN relay server - optional ---
 # When TUNNEL_HOST is set, the PE opens  ssh -R  at boot so agents outside
 # the LAN can reach it through your relay:

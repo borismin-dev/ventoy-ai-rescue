@@ -31,7 +31,11 @@ chroot "$ROOTFS" bash -c 'id rescue 2>/dev/null || useradd -m -s /bin/bash rescu
 
 # --- tools ---
 [ -f "$SRC/ai-debug" ] && install -m 0755 "$SRC/ai-debug" "$ROOTFS/usr/local/bin/ai-debug"
+# v2 command-name unification: `ai-rescue` works on the Linux PE too
+# (the Windows PE gets an ai-debug.cmd shim next to ai-rescue.exe).
+ln -sf ai-debug "$ROOTFS/usr/local/bin/ai-rescue"
 [ -f "$SRC/rescue-agent.py" ] && install -m 0755 "$SRC/rescue-agent.py" "$ROOTFS/usr/local/bin/rescue-agent"
+[ -f "$SRC/panel.html" ] && install -D -m 0644 "$SRC/panel.html" "$ROOTFS/usr/local/share/rescue-panel.html"
 [ -f "$SRC/rescue-boot.sh" ] && install -m 0755 "$SRC/rescue-boot.sh" "$ROOTFS/usr/local/bin/rescue-boot"
 install -m 0644 "$SRC/rescue-agent.service" "$ROOTFS/etc/systemd/system/rescue-agent.service"
 install -m 0644 "$SRC/rescue-setup.service" "$ROOTFS/etc/systemd/system/rescue-setup.service"

@@ -1,5 +1,23 @@
 # 产物清单（MANIFEST）
 
+## v2（2026-11-09，九项优化，详见 README「v2 更新」）
+
+存放位置：构建机 `/data/home/dist-v2/`（v1 的 `/data/home/dist/` 原样保留）。
+融合版 ISO 含第三方免费软件，**绝不上传**，仅存机内。
+
+| 产物 | 大小（字节） | SHA-256 | 验证结论 |
+|---|---|---|---|
+| AI-Rescue-PE.iso | 327,155,712 | `d14aa45487e79b4e694a54f2c785cc2766da7163bfe6c127047238c2e47f7a05` | QEMU：diagnose 退出码 0、/health 200、固定令牌 200/错令牌 401、ai-rescue 别名可用、面板外部 200/401、cleanup 对挂载骨架卷实测通过、e1000+rtl8139 均 DHCP 拿址 |
+| HotPE-Fusion-AIRescue.iso | 1,109,088,256 | `82a80d15f82e41d641d3c2a0bdf02a659dc431bd2d9c97b5df00d0fc220bbf56` | QEMU：进桌面、agent 自启、固定令牌、误报回归 0 CRITICAL、桌面重开双份在位、ai-debug 别名实跑、面板外部 200/401、cleanup 双向核实通过；fixboot 链路通但 bcdboot 因骨架卷缺 bootstr.dll 未成功（如实记录） |
+| Ventoy-AI-Rescue-USB.img | 2,147,483,648 | `7b058b6fc439b55c7a44bf6b6357fdd1f217e322279734b50792a5e9614beff4` | 官方 Ventoy 1.1.18 基座 + 上面两个 v2 ISO；QEMU SeaBIOS 与 OVMF 双启动均进菜单、两条目可见（截图 logs/machine/v2-ventoy-*.png） |
+
+组件：ai-rescue.exe（v2，strip 可复现构建）7,567,360 字节，
+SHA-256 `1f05fb5ac953b2a9d6c6d38d77fe06aff329c8db430fc43fc1a1f74c59d8c376`，
+连编两次逐位一致；已注入融合版 WIM 的 `\Windows\System32\`（含
+`ai-debug.cmd` 别名与桌面 `AI维护-重开.cmd`），并 embed 只读面板。
+
+## v1（2026-11-08）
+
 构建机：InstaBox main-1（`m_agqyqiykhhc2xqyinwogy3t7aq`），构建日期 2026-11-08。
 所有镜像只存于构建机 `/data/home/dist/`，未上传任何网盘/GitHub；融合版 ISO 含第三方
 免费软件，按约定**永不上传**，仅供用户个人 U 盘使用。

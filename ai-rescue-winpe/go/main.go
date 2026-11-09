@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/subtle"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -40,11 +41,29 @@ import (
 const agentPort = 8734
 const agentVersion = "1.0-go"
 
+// panelHTML is the read-only status panel (v2 item 9): a single self
+// contained HTML file, identical to the Linux agent's panel.html. Its JS
+// only ever calls GET /info and GET /diagnose - there is deliberately no
+// way to trigger any maintenance operation from the page.
+//
+//go:embed panel.html
+var panelHTML []byte
+
+const panel401HTML = `<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI-Rescue 维护面板</title></head>
+<body style="font-family:sans-serif;background:#f4f6f8;color:#1c2733;padding:24px">
+<h2>令牌缺失或无效（401）</h2>
+<p>这个只读面板需要令牌才能打开。请扫描 PE 屏幕上的二维码，或使用控制台横幅里带
+?token= 的完整地址访问。</p>
+</body></html>`
+
 // ---------- config ----------
 
 func loadConfig() map[string]string {
 	cfg := map[string]string{}
-	for _, k := range []string{"AI_API_BASE", "AI_API_KEY", "AI_MODEL", "TUNNEL_HOST"} {
+	for _, k := range []string{"AI_API_BASE", "AI_API_KEY", "AI_MODEL", "TUNNEL_HOST", "RESCUE_TOKEN"} {
 		if v := os.Getenv(k); v != "" {
 			cfg[k] = v
 		}
@@ -145,6 +164,31 @@ func runCapture(name string, args ...string) string {
 	return buf.String()
 }
 
+// findTool locates a Windows utility: first the PE's own PATH, then - as a
+// fallback - the System32 of any installed Windows on any volume (slim PEs
+// often lack bcdedit/wevtutil while the systems they rescue carry copies).
+// Returns "" when no copy exists anywhere.
+func findTool(name string) string {
+	if p, err := exec.LookPath(name); err == nil {
+		return p
+	}
+	for _, root := range driveRoots() {
+		p := filepath.Join(root, "Windows", "System32", name+".exe")
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			return p
+		}
+	}
+	return ""
+}
+
+func runTool(name string, args ...string) string {
+	p := findTool(name)
+	if p == "" {
+		return fmt.Sprintf("(%s unavailable: not in PATH and no copy in any volume's Windows\\System32)", name)
+	}
+	return runCapture(p, args...)
+}
+
 func gb(b uint64) float64 { return float64(b) / (1 << 30) }
 
 // ---------- diagnose ----------
@@ -177,14 +221,23 @@ func collectDiagnose() (string, []Finding) {
 			pctFree = float64(free) / float64(total) * 100
 		}
 		sb.WriteString(fmt.Sprintf("  %s total %.1f GiB, free %.1f GiB (%.0f%% free)\n", root, gb(total), gb(free), pctFree))
-		if total > 0 && pctFree < 3 {
+		winDir := filepath.Join(root, "Windows")
+		winStat, winErr := os.Stat(winDir)
+		hasWindows := winErr == nil && winStat.IsDir()
+		isSysDrive := strings.EqualFold(root, os.Getenv("SystemDrive")+"\\")
+		// Space findings ONLY for volumes hosting a Windows installation
+		// (real system candidates). USB sticks, Ventoy/EFI partitions and
+		// other volumes without a Windows install are listed above but
+		// never alarm: on real hardware a full 1 GiB Ventoy partition was
+		// false-reported as CRITICAL (2026-11-09). The PE's own SystemDrive
+		// (RAM disk) never warns either.
+		if hasWindows && !isSysDrive && total > 0 && pctFree < 3 {
 			findings = append(findings, Finding{"CRITICAL", fmt.Sprintf("Volume %s almost full (%.0f%% free)", root, pctFree), "", "Free space or extend the volume; a full system volume breaks boot/update."})
-		} else if total > 0 && pctFree < 10 {
+		} else if hasWindows && !isSysDrive && total > 0 && pctFree < 10 {
 			findings = append(findings, Finding{"WARN", fmt.Sprintf("Volume %s low on space (%.0f%% free)", root, pctFree), "", "Plan cleanup (WinSxS/temp/logs)."})
 		}
 		// Windows installs & crash dumps per volume
-		winDir := filepath.Join(root, "Windows")
-		if st, err := os.Stat(winDir); err == nil && st.IsDir() {
+		if hasWindows {
 			sb.WriteString(fmt.Sprintf("  %s contains a Windows installation\n", root))
 			dumpDir := filepath.Join(winDir, "Minidump")
 			if entries, err := os.ReadDir(dumpDir); err == nil && len(entries) > 0 {
@@ -227,7 +280,7 @@ func collectDiagnose() (string, []Finding) {
 	}
 
 	sb.WriteString("\n[BCD - bcdedit /enum]\n")
-	bcd := runCapture("bcdedit", "/enum", "{bootmgr}")
+	bcd := runTool("bcdedit", "/enum", "{bootmgr}")
 	sb.WriteString(indent(bcd, 2000))
 	if strings.Contains(bcd, "unavailable") {
 		sb.WriteString("  (bcdedit not present in this PE - BCD check skipped)\n")
@@ -235,13 +288,13 @@ func collectDiagnose() (string, []Finding) {
 		strings.Contains(strings.ToLower(bcd), "could not be opened") {
 		findings = append(findings, Finding{"CRITICAL", "BCD store could not be opened", "", "Boot from PE, locate the ESP/BCD, rebuild: bcdboot C:\\Windows /s Z: /f ALL (adjust letters)."})
 	}
-	bcdAll := runCapture("bcdedit", "/enum", "all")
+	bcdAll := runTool("bcdedit", "/enum", "all")
 	if strings.Contains(bcdAll, "Windows Boot Loader") {
 		sb.WriteString("  Windows Boot Loader entries found.\n")
 	}
 
 	sb.WriteString("\n[Event log - latest System errors (wevtutil)]\n")
-	ev := runCapture("wevtutil", "qe", "System", "/c:15", "/rd:true", "/f:text", "/q:*[System[(Level=1 or Level=2)]]")
+	ev := runTool("wevtutil", "qe", "System", "/c:15", "/rd:true", "/f:text", "/q:*[System[(Level=1 or Level=2)]]")
 	sb.WriteString(indent(ev, 2500))
 	if strings.Contains(strings.ToLower(ev), "bugcheck") || strings.Contains(ev, "0x0000") {
 		findings = append(findings, Finding{"INFO", "Bugcheck/error events present in System log", "", "Correlate STOP codes with minidumps above."})
@@ -348,8 +401,9 @@ func min(a, b int) int {
 // ---------- agent ----------
 
 var (
-	agentToken string
-	agentCfg   map[string]string
+	agentToken       string
+	agentTokenSource string
+	agentCfg         map[string]string
 )
 
 func genToken() string {
@@ -391,17 +445,74 @@ func agentInfo() map[string]any {
 		}
 	}
 	_, llm := agentCfg["AI_API_KEY"]
-	return map[string]any{
+	info := map[string]any{
 		"hostname": host, "agent_version": agentVersion, "os": "windows-pe",
 		"go": runtime.Version(), "time": time.Now().Format(time.RFC3339),
 		"ipv4": ips, "llm_configured": llm, "api_port": agentPort,
 		"note": "WinPE has no native sshd in slim builds; this HTTP API is the primary remote channel.",
 	}
+	// read-only extras for the status panel (item 9)
+	if total, avail, load, ok := memInfo(); ok {
+		info["memory"] = map[string]any{"total": total, "avail": avail, "load_pct": load}
+	}
+	var vols []any
+	for _, root := range driveRoots() {
+		if total, free, ok := diskFree(root); ok {
+			vols = append(vols, map[string]any{"root": root, "total": total, "free": free})
+		}
+	}
+	info["volumes"] = vols
+	info["disks"] = disksInfo()
+	return info
+}
+
+// disksInfo returns physical disks with their SMART-ish status as reported
+// by wmic (OK / Pred Fail). Empty when wmic is unavailable in the PE.
+func disksInfo() []any {
+	out := runCapture("wmic", "diskdrive", "get", "Model,Status", "/format:list")
+	if strings.HasPrefix(out, "(") {
+		return nil
+	}
+	var disks []any
+	cur := map[string]any{}
+	flush := func() {
+		if len(cur) > 0 {
+			disks = append(disks, cur)
+			cur = map[string]any{}
+		}
+	}
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			flush()
+			continue
+		}
+		if k, v, ok := strings.Cut(line, "="); ok {
+			switch k {
+			case "Model":
+				cur["model"] = v
+			case "Status":
+				cur["status"] = v
+			}
+		}
+	}
+	flush()
+	return disks
 }
 
 func runAgent() {
 	agentCfg = loadConfig()
-	agentToken = genToken()
+	// Fixed token when the user configured RESCUE_TOKEN (>= 8 chars) in
+	// rescue-config/agent.conf: stable across agent restarts, so other
+	// agents (Hermes etc.) can be told once. Unset/short -> unchanged
+	// legacy behaviour: a fresh random token at every agent start.
+	if t := strings.TrimSpace(agentCfg["RESCUE_TOKEN"]); len(t) >= 8 {
+		agentToken = t
+		agentTokenSource = "fixed (agent.conf)"
+	} else {
+		agentToken = genToken()
+		agentTokenSource = "random (per agent start)"
+	}
 	// token also dropped on the RAM disk for the local operator/scripts
 	tokenPaths := []string{}
 	if sd := os.Getenv("SystemDrive"); sd != "" {
@@ -413,6 +524,22 @@ func runAgent() {
 	}
 
 	mux := http.NewServeMux()
+	// Read-only status panel (item 9). Same auth as the API: no token or a
+	// wrong token gets a 401 hint page, never the panel itself.
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" && r.URL.Path != "/index.html" {
+			writeJSON(w, 404, map[string]any{"error": "not found"})
+			return
+		}
+		if !authed(r) {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(401)
+			_, _ = w.Write([]byte(panel401HTML))
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(panelHTML)
+	})
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"status": "ok", "service": "rescue-agent", "version": agentVersion, "os": "windows-pe", "time": time.Now().Format(time.RFC3339)})
 	})
@@ -479,6 +606,8 @@ func runAgent() {
 		writeJSON(w, 200, map[string]any{"cmd": body.Cmd, "exitCode": code, "stdout": tail(outBuf.String(), 65536), "stderr": ""})
 	}))
 
+	registerActionEndpoint(mux, guard)
+
 	printBanner()
 	fmt.Printf("[ai-rescue] agent listening on 0.0.0.0:%d\n", agentPort)
 	srv := &http.Server{Addr: fmt.Sprintf("0.0.0.0:%d", agentPort), Handler: mux}
@@ -523,8 +652,12 @@ func printBanner() {
 	fmt.Println("================================================================")
 	fmt.Printf("  Interfaces  : %s\n", ipLine)
 	fmt.Printf("  Agent API   : http://<this-machine>:%d  (/health /info /diagnose /exec)\n", agentPort)
+	fmt.Println("  Panel       : read-only status + diagnose page - scan the QR below") 
 	fmt.Println("  mDNS        : ai-rescue.local may not resolve from slim WinPE; prefer the IP URL below")
 	fmt.Printf("  TOKEN       : %s\n", agentToken)
+	fmt.Printf("  Token source: %s\n", agentTokenSource)
+	fmt.Println("  Keep open   : closing this window STOPS the agent. Reopen with")
+	fmt.Println("                'ai-rescue.exe agent' or the AI-reopen icon on the desktop.")
 	fmt.Println("  SSH         : not available in slim WinPE (no sshd) - HTTP API is the channel")
 	fmt.Printf("  Tunnel      : %s\n", map[bool]string{true: "TUNNEL_HOST configured in agent.conf (use an external ssh client if present)", false: "off (LAN only)"}[agentCfg["TUNNEL_HOST"] != ""])
 	fmt.Println("----------------------------------------------------------------")

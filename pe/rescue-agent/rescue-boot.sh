@@ -59,7 +59,15 @@ if [ -n "${TUNNEL_HOST:-}" ]; then
 fi
 echo "$TUNNEL_STATUS" > /run/tunnel.status
 
-CONNECT_URL="http://ai-rescue.local:8734/?token=${TOKEN}"
+# The QR / connect URL must be openable from other LAN devices: prefer the
+# wired interface's LAN IP, fall back to any IPv4, then to the mDNS name.
+FIRST_IP="$(echo "$IPLIST" | tr ';' '\n' | grep -E '^[[:space:]]*e' | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -1)"
+[ -z "$FIRST_IP" ] && FIRST_IP="$(echo "$IPLIST" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -1)"
+if [ -n "$FIRST_IP" ]; then
+  CONNECT_URL="http://${FIRST_IP}:8734/?token=${TOKEN}"
+else
+  CONNECT_URL="http://ai-rescue.local:8734/?token=${TOKEN}"
+fi
 {
   echo ""
   echo "================================================================"

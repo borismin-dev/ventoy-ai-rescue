@@ -28,6 +28,7 @@ def collect():
     d['cpu'] = run("nproc; grep -m1 'model name' /proc/cpuinfo")
     d['mem'] = run("free -h")
     d['disk_space'] = run("df -h -x tmpfs -x devtmpfs 2>/dev/null")
+    d['disk_entries'] = disk_entries()
     d['lsblk'] = run("lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,MODEL 2>/dev/null || lsblk")
     d['blkid'] = run("blkid 2>/dev/null; sudo -n blkid 2>/dev/null")
     d['dmesg_critical'] = run("dmesg 2>/dev/null | grep -iE 'error|fail|panic|oops|I/O error|EXT4-fs error|critical' | tail -40")
@@ -49,24 +50,60 @@ def collect_smart():
         out.append(run(f"{exe} -H -A /dev/{disk} 2>/dev/null | grep -E 'SMART overall|Reallocated|Pending|Uncorrectable|Temperature|Power_On' | head -20"))
     return "\n".join(out) if out else "no disks enumerated"
 
+def disk_entries():
+    """Machine-readable df for the rule engine: one dict per filesystem.
+
+    Uses df -B1 -P (byte sizes, one line per fs) plus the read-only set
+    from /proc/mounts, so the rules can judge size and writability
+    instead of parsing the human-readable table.
+    """
+    ro_mounts = set()
+    try:
+        with open("/proc/mounts") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 4 and "ro" in parts[3].split(","):
+                    ro_mounts.add(parts[1].replace("\\040", " "))
+    except Exception:
+        pass
+    entries = []
+    out = run("df -B1 -P -x tmpfs -x devtmpfs 2>/dev/null")
+    for line in out.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) < 6:
+            continue
+        try:
+            size = int(parts[1]); used = int(parts[2])
+        except Exception:
+            continue
+        mnt = " ".join(parts[5:])
+        entries.append({"source": parts[0], "size": size, "used": used,
+                        "pct": (used * 100 // size) if size else 0,
+                        "mount": mnt, "ro": mnt in ro_mounts})
+    return entries
+
 def diagnose_rules(d):
     findings = []  # (level, title, detail, advice)
-    # disk space (skip live-media read-only mounts: ISO/squashfs are always 100%)
-    for line in d['disk_space'].splitlines()[1:]:
-        parts = line.split()
-        if parts and (parts[0].startswith("/dev/loop") or parts[0].startswith("/dev/sr")):
+    # Disk space: only real, writable, non-trivial filesystems may raise
+    # findings. Read-only mounts (live media, ISOs, Ventoy partitions),
+    # filesystems < 2 GiB (EFI/boot partitions) and the live system's own
+    # mounts are shown in the report's [Disk space] table but never alarm.
+    for e in d.get('disk_entries', []):
+        src, mnt = e["source"], e["mount"]
+        if src.startswith("/dev/loop") or src.startswith("/dev/sr"):
             continue
-        if len(parts) >= 6 and parts[5].startswith("/run/live"):
+        if mnt.startswith("/run/live") or "ventoy" in mnt.lower():
             continue
-        if len(parts) >= 5 and parts[4].endswith('%'):
-            try:
-                pct = int(parts[4].rstrip('%'))
-                if pct >= 95:
-                    findings.append(("CRITICAL", f"Filesystem nearly full: {parts[0]} {parts[4]}", line, "Free space: clear logs/cache, resize, or move data. Check: du -xh / | sort -h | tail"))
-                elif pct >= 85:
-                    findings.append(("WARN", f"Filesystem filling up: {parts[0]} {parts[4]}", line, "Plan cleanup before it hits 100%."))
-            except Exception:
-                pass
+        if e["ro"]:
+            continue
+        if e["size"] < 2 * 1024**3:
+            continue
+        pct = e["pct"]
+        line = f"{src} {pct}% used, mounted on {mnt}"
+        if pct >= 95:
+            findings.append(("CRITICAL", f"Filesystem nearly full: {src} {pct}%", line, "Free space: clear logs/cache, resize, or move data. Check: du -xh / | sort -h | tail"))
+        elif pct >= 85:
+            findings.append(("WARN", f"Filesystem filling up: {src} {pct}%", line, "Plan cleanup before it hits 100%."))
     if 'I/O error' in d['dmesg_critical'] or 'EXT4-fs error' in d['dmesg_critical']:
         findings.append(("CRITICAL", "Kernel reports storage I/O / filesystem errors", d['dmesg_critical'][:800], "Back up data FIRST. Check SMART, cables, run fsck from rescue media (filesystem unmounted)."))
     if 'panic' in d['dmesg_critical'].lower() or 'oops' in d['dmesg_critical'].lower():

@@ -53,6 +53,98 @@ bootmgr 卡在 Loading files 循环（cdrkit 的 UDF 大文件 extent 实现有�
   启动模式子菜单，选 "Boot in normal mode" 后 Linux PE 正常启动、agent
   /health 200（`logs/machine/qemu-ventoy-official.log`）。
 
+## v2 更新（2026-11-09，九项）
+
+产物在构建机 `/data/home/dist-v2/`（旧 `/data/home/dist/` 原样保留），清单见
+`dist/MANIFEST.md` 的 v2 部分。
+
+1. **卷满误报修复**：空间告警（CRITICAL <3% / WARN <10%）只对「含 Windows
+   安装的卷」触发；U 盘/Ventoy 分区/无 Windows 的小分区只在 [Volumes] 列表
+   如实显示，不进 findings；PE 系统盘 X: 永不告警。真机首启时 1 GiB 的
+   Ventoy 分区被报 CRITICAL 即此问题。Linux 版 ai-debug 同步：跳过只读
+   挂载、<2GiB 文件系统与启动介质。
+2. **固定令牌**：`rescue-config/agent.conf` 新增 `RESCUE_TOKEN`（≥8 字符
+   时生效），两版 agent 启动即用它，不再每次开机随机；横幅与
+   rescue-token.txt 照常输出并标注 `token source: fixed (agent.conf)`。
+   未配置时行为与 v1 完全一致。
+3. **命令双名统一**：Windows 版注入 `ai-debug.cmd` 转发 `ai-rescue.exe`，
+   Linux 版镜像内加 `ai-rescue` 软链指向 `ai-debug`；两边 `ai-debug` 与
+   `ai-rescue` 都可用。
+4. **bcdedit / wevtutil 回退**：diagnose 找工具时先查 PATH，再遍历各卷
+   `Windows\System32` 借用已安装系统的副本，全无才如实标注跳过。
+5. **桌面重开入口**：融合版 WIM 的 Default 与 Public 桌面各注入
+   `AI维护-重开.cmd`（双击重开 agent）；agent 横幅加「关闭本窗口即停止
+   服务」提示。
+6. **Linux 守护确认**：`rescue-agent.service` 已有 `Restart=on-failure` +
+   `RestartSec=3`，查实保留（Windows 侧 PE 环境无真守护，靠第 5 项）。
+7. **一键动作接口** `POST /action`（与 /exec 同级令牌鉴权，JSON 入出参）：
+   - `cleanup`（可 `dry_run`）：对每个含 Windows 安装的卷清固定白名单——
+     `Windows\Temp`、各用户 `AppData\Local\Temp`、
+     `Windows\SoftwareDistribution\Download`、`$Recycle.Bin` 内容，以及
+     `Windows\Logs\CBS` 下的 .log/.cab 文件；pagefile.sys / hiberfil.sys /
+     Prefetch 明确不动；逐卷逐项返回删除前后大小。Linux 版对已挂载
+     （读写）的 Windows 卷实现同一白名单。
+   - `fixboot`：定位 ESP（FAT 卷含 \EFI，必要时 mountvol 挂无盘符卷到
+     S:）→ `bcdboot <卷>:\Windows /s <ESP> /f ALL`，逐步返回输出与成败，
+     失败如实报错。
+   - Linux 版对 fixboot 返回 `{"error":"not supported on linux-pe"}`。
+8. **硬件兼容强化**：
+   - Windows 融合版基座 WIM 自带完整 DriverStore（434 个驱动包），已逐项
+     核查主流有线网卡 INF 与 HWID 覆盖：Intel（e1000/82574/I217/I219
+     等 nete1*/net1*/netx* 系列）、Realtek（RTL8168/8111 rt640x64、
+     RTL8139 netrtl64、USB RTL8153 rtux64w10/rtucx21）、Broadcom
+     （b57nd60a/bnxtnd）、Qualcomm Atheros（netl1c/l1e/l160a）、ASIX USB
+     （AX88179/AX88772）全部命中——基座已覆盖，未再叠加注入重复驱动包。
+     关键驱动版本示例：rt640x64 10.068.0815.2023（2023-08-15）。
+   - Linux PE（内核 6.12.107+deb13）模块核查：e1000/e1000e/igb/ixgbe、
+     r8169、8139too、virtio_net、tg3、bnx2、alx、r8152、asix、
+     ax88179_178a 与 usbhid 全部在盘，rtl_nic/tigon 固件齐备，无需补编。
+   - Ventoy 镜像双启动回归：SeaBIOS（Legacy）与 OVMF（UEFI）下均进
+     Ventoy 菜单、两 ISO 条目可见（截图 `logs/machine/v2-ventoy-*.png`）。
+   - **Secure Boot**：本镜像未做签名处理。使用时需在目标机关闭
+     Secure Boot，或按 Ventoy 官方流程注册其密钥（MokManager），
+     否则 UEFI 安全启动会拦截。
+9. **只读查看前端**：两版 agent 内置同一单文件 HTML 面板（Go 版 embed
+   进二进制，Linux 版随脚本打包），资源全内联、无外链，中文、手机
+   自适应。扫横幅二维码（带令牌的局域网地址 `http://<IP>:8734/?token=…`）
+   即打开：状态总览（主机名/内存/SMART/各卷容量条，数据来自 /info）、
+   诊断报告（触发 GET /diagnose，findings 按级分色卡片 + 原文展开）。
+   **页面纯只读：没有任何操作按钮，JS 只调 GET /info 与 GET
+   /diagnose**；清理/修复/命令执行仍由 AI 经 /action、/exec（令牌
+   鉴权不变）完成。无/错令牌访问页面返回 401 提示页。
+
+经用户决定取消、未实现：diagnose 报告自动落盘档案（rescue-reports）、
+drivers-backup / drivers-restore 动作、fixboot 的 BCD 备份步骤。
+
+### v2 验证结果（QEMU，宿主机侧经 hostfwd 从客户机外部访问）
+
+- 融合版：/health 200、无令牌 401、固定令牌 /info 200/错令牌 401；
+  diagnose findings 无小卷误报（回归通过）；桌面双份「AI维护-重开.cmd」
+  与 System32\ai-debug.cmd 在位，`ai-debug diagnose` 实跑出报告；
+  bcdedit 回退路径有记录（本次 QEMU 引导方式下 bcdedit 枚举失败、报告
+  如实标注跳过）。日志 `logs/machine/qemu-fusion-v2-test.log`。
+- /action cleanup（融合版，对 QEMU 骨架 Windows 卷）：dry_run 只报数
+  不删；实删释放 4,221,057 字节，五个白名单目标清空、CBS 仅删
+  .log/.cab（保留 keep.txt），白名单外样本（System32 文件、Data 文件、
+  pagefile.sys）完好——客户机内 dir 与优雅关机后宿主机 mtools 双向
+  核实。日志 `logs/machine/qemu-retest-test.log`。
+- /action fixboot（融合版）：ESP 与目标卷定位、bcdboot 调用链验证
+  通过；但 bcdboot 本体因测试骨架卷缺 `System32\bootstr.dll` 报错
+  c0000001。该文件是真实 Windows 安装的标配（所有精简 PE 均剔除
+  它），骨架卷未能播种到正版副本，故 QEMU 内未取得 bcdboot 成功
+  字样；agent 对失败如实返回、未假报成功。给骨架卷补入任意真实
+  Windows 的 bootstr.dll 后可复测。
+- 面板（k）：融合版与 Linux 版均从宿主机外部打开：带令牌 200 且含
+  状态区元素，无令牌/错令牌 401；页面源码无 /exec、/action 引用。
+- Linux PE：ai-debug diagnose 退出码 0、/health 200、ai-rescue 别名
+  可用；cleanup 对读写挂载的骨架卷同白名单实测（释放 4,220,928
+  字节，七项文件检查全对）；fixboot 返回 not supported 如实标注。
+  （该轮 diagnose 有一条 dmesg I/O 错误 CRITICAL，系 QEMU/TCG 模拟
+  存储噪声，与空间误报规则无关。）
+- 网络：融合版 e1000 拿到 DHCP 10.0.2.15 且 agent 外部可达；Linux PE
+  在 e1000 与 rtl8139 两种模拟网卡下均识别接口并 DHCP 拿址。
+- USB 键鼠：QEMU 默认 USB 输入下可操作 PE 桌面/终端（记通过）。
+
 ## 产物清单
 
 见 `dist/MANIFEST.md`（名称/大小/sha256/存放位置）。
