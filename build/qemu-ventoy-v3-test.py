@@ -3,11 +3,10 @@
 
 SELECT_INDEX env: number of Down keypresses in the Ventoy menu before
 Return (menu order is alphabetical; verify against ventoy-menu.png).
-"""
 
 Boots Ventoy-AI-Rescue-USB.img as an IDE hard disk (BIOS). Evidence:
   - screendump of the Ventoy menu once the screen settles
-  - sendkey Return to boot the first entry (AI-Rescue-PE.iso, alphabetical)
+  - sendkey Down x SELECT_INDEX + Return to boot the chosen entry
   - the Linux PE's rescue-agent must then answer on host 18734 /health,
     which proves the whole chain: Ventoy MBR -> GRUB menu -> ISO -> live
     system -> agent. mDNS cannot be exercised over QEMU user networking.
