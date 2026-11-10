@@ -10,6 +10,8 @@
 # Usage:
 #   VENTOY_DIR=<extracted ventoy-1.1.18> make-ventoy-usb-img.sh \
 #       <AI-Rescue-PE.iso> <HotPE-Fusion-AIRescue.iso> <output.img> [sizeMiB]
+#   v3: set PE32_ISO=<AI-Rescue-PE-32.iso> to also copy the 32-bit fallback
+#   ISO into the data partition as /AI-Rescue-PE-32.iso.
 set -euo pipefail
 export PATH=$PATH:/usr/sbin:/sbin
 
@@ -51,6 +53,9 @@ mmd -i "$P1IMG" ::/ventoy ::/rescue-config
 mcopy -i "$P1IMG" "$SCRIPT_DIR/ventoy.json" ::/ventoy/ventoy.json
 mcopy -i "$P1IMG" "$PE_ISO" ::/AI-Rescue-PE.iso
 mcopy -i "$P1IMG" "$FUSION_ISO" ::/HotPE-Fusion-AIRescue.iso
+if [ -n "${PE32_ISO:-}" ]; then
+  mcopy -i "$P1IMG" "$PE32_ISO" ::/AI-Rescue-PE-32.iso
+fi
 if [ -f "$SCRIPT_DIR/../pe/rescue-agent/agent.conf.example" ]; then
   mcopy -i "$P1IMG" "$SCRIPT_DIR/../pe/rescue-agent/agent.conf.example" ::/rescue-config/agent.conf.example
 fi

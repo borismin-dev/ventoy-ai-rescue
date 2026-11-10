@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""ai-debug - AI 调试维护工具 (AI-Rescue-PE)
-Modes:
-  ai-debug diagnose [--llm]   Offline rule-based diagnosis + optional LLM summary
-  ai-debug ask "question"     Ask LLM (OpenAI-compatible API via env)
-  ai-debug setup-local-model  Download llama.cpp + small GGUF to /opt (online, on demand)
-Env for LLM:
-  AI_API_BASE  e.g. https://api.openai.com/v1  (default)
-  AI_API_KEY   API key (never baked into ISO)
-  AI_MODEL     e.g. gpt-4o-mini (default)
+"""ai-debug - AI 调试维护工具 (AI-Rescue-PE) v3
+用法:
+  ai-debug diagnose [--llm]   离线规则诊断（可选 LLM 总结）
+  ai-debug unlock [设备]      解锁 BitLocker 加密卷并挂载（需 root，交互输入密钥）
+  ai-debug ask "问题"         向 LLM 提问（OpenAI 兼容接口，走环境变量）
+  ai-debug setup-local-model  下载 llama.cpp + 小 GGUF 模型到 /opt（需联网）
+环境变量（LLM）:
+  AI_API_BASE  如 https://api.openai.com/v1（默认）
+  AI_API_KEY   接口密钥（绝不写进 ISO）
+  AI_MODEL     如 gpt-4o-mini（默认）
 """
 import os, sys, subprocess, json, platform, shutil, urllib.request, urllib.error
 from datetime import datetime
@@ -17,7 +18,7 @@ def run(cmd, timeout=15):
         r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
         return (r.stdout + r.stderr).strip()
     except Exception as e:
-        return f"(failed: {e})"
+        return f"(执行失败: {e})"
 
 def collect():
     d = {}
@@ -31,6 +32,7 @@ def collect():
     d['disk_entries'] = disk_entries()
     d['lsblk'] = run("lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,MODEL 2>/dev/null || lsblk")
     d['blkid'] = run("blkid 2>/dev/null; sudo -n blkid 2>/dev/null")
+    d['bitlocker'] = bitlocker_volumes()
     d['dmesg_critical'] = run("dmesg 2>/dev/null | grep -iE 'error|fail|panic|oops|I/O error|EXT4-fs error|critical' | tail -40")
     d['smart'] = collect_smart()
     d['network'] = run("ip -brief a 2>/dev/null; echo ---; ip route 2>/dev/null; echo ---; cat /etc/resolv.conf 2>/dev/null")
@@ -43,12 +45,12 @@ def collect_smart():
     # smartctl lives in /usr/sbin which is not always on a live user's PATH
     exe = shutil.which("smartctl") or ("/usr/sbin/smartctl" if os.path.exists("/usr/sbin/smartctl") else None)
     if not exe:
-        return "smartctl not installed"
+        return "未安装 smartctl"
     disks = run("lsblk -dn -o NAME,TYPE | awk '$2==\"disk\"{print $1}'").split()
     for disk in disks[:4]:
         out.append(f"--- /dev/{disk} ---")
         out.append(run(f"{exe} -H -A /dev/{disk} 2>/dev/null | grep -E 'SMART overall|Reallocated|Pending|Uncorrectable|Temperature|Power_On' | head -20"))
-    return "\n".join(out) if out else "no disks enumerated"
+    return "\n".join(out) if out else "未枚举到磁盘"
 
 def disk_entries():
     """Machine-readable df for the rule engine: one dict per filesystem.
@@ -82,6 +84,139 @@ def disk_entries():
                         "mount": mnt, "ro": mnt in ro_mounts})
     return entries
 
+# ---------- BitLocker (FVE) 卷检测与解锁（v3 新增） ----------
+# 密钥纪律：恢复密钥/卷密码只由操作者在本机终端运行时输入，交给 cryptsetup
+# 的交互提示读取。本程序不接收、不存储、不记录、不上报任何密钥。
+
+def bitlocker_volumes():
+    """列出 BitLocker 加密卷：先看 blkid 的 TYPE=BitLocker，再用引导扇区
+    签名（偏移 3 处的 '-FVE-FS-'）兜底扫描分区与整盘设备（解锁后 blkid
+    类型可能变化，签名仍在）。返回 [{device, uuid, mapper, mount}]。"""
+    vols = []
+    seen = set()
+    cur = {}
+    def flush():
+        if cur.get("TYPE") == "BitLocker" and cur.get("DEVNAME"):
+            vols.append({"device": cur["DEVNAME"], "uuid": cur.get("UUID", "")})
+            seen.add(cur["DEVNAME"])
+    for line in run("blkid -o export 2>/dev/null").splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            cur[k.strip()] = v.strip()
+        elif not line.strip() and cur:
+            flush(); cur = {}
+    if cur:
+        flush()
+    try:
+        parts = run("lsblk -rno NAME,TYPE | awk '$2==\"part\" || $2==\"disk\"{print $1}'").split()
+    except Exception:
+        parts = []
+    for name in parts:
+        dev = f"/dev/{name}"
+        if dev in seen:
+            continue
+        try:
+            with open(dev, "rb") as f:
+                f.seek(3)
+                if f.read(8) == b"-FVE-FS-":
+                    vols.append({"device": dev, "uuid": ""})
+                    seen.add(dev)
+        except Exception:
+            pass
+    for v in vols:
+        base = os.path.basename(v["device"])
+        mapper = f"bitlocker-{base}"
+        v["mapper"] = mapper if os.path.exists(f"/dev/mapper/{mapper}") else ""
+        v["mount"] = ""
+        if v["mapper"]:
+            v["mount"] = run(f"lsblk -no MOUNTPOINT /dev/mapper/{mapper}").strip()
+    return vols
+
+def cmd_unlock(args):
+    if os.geteuid() != 0:
+        print("unlock 需要 root 权限，请这样运行：sudo ai-debug unlock")
+        return 1
+    vols = bitlocker_volumes()
+    if not vols:
+        print("未检测到 BitLocker 加密卷。")
+        return 0
+    target = None
+    if args:
+        a = args[0]
+        for i, v in enumerate(vols, 1):
+            if a in (v["device"], os.path.basename(v["device"]), str(i)):
+                target = v
+                break
+        if target is None:
+            print(f"指定的 {a} 不在 BitLocker 卷列表中，列表如下：")
+    if target is None:
+        print("检测到以下 BitLocker 加密卷：")
+        for i, v in enumerate(vols, 1):
+            if v.get("mount"):
+                state = f"已解锁，挂载于 {v['mount']}"
+            elif v.get("mapper"):
+                state = "已解密（尚未挂载）"
+            else:
+                state = "未解锁"
+            print(f"  {i}. {v['device']}  {state}")
+        if args:
+            return 1
+        try:
+            sel = input("输入要解锁的序号（直接回车取消）：").strip()
+        except EOFError:
+            sel = ""
+        if not sel:
+            print("已取消。")
+            return 0
+        try:
+            target = vols[int(sel) - 1]
+        except Exception:
+            print("序号无效，已取消。")
+            return 1
+    dev = target["device"]
+    base = os.path.basename(dev)
+    name = f"bitlocker-{base}"
+    mnt = f"/mnt/bitlocker-{base}"
+    if target.get("mount"):
+        print(f"{dev} 已解锁并挂载于 {target['mount']}，无需重复操作。")
+        return 0
+    cs = shutil.which("cryptsetup") or ("/usr/sbin/cryptsetup" if os.path.exists("/usr/sbin/cryptsetup") else None)
+    if not cs:
+        print("本机未安装 cryptsetup，无法解锁。")
+        return 1
+    if not os.path.exists(f"/dev/mapper/{name}"):
+        print(f"将解锁 {dev} -> /dev/mapper/{name}")
+        print("接下来 cryptsetup 会提示输入密钥：可输入恢复密钥（48 位数字，可带短横线）或卷密码；")
+        print("输入时屏幕不会回显。密钥只用于本次解锁，不会被记录、保存或上报。")
+        r = subprocess.run([cs, "open", "--type", "bitlk", dev, name])
+        if r.returncode != 0 or not os.path.exists(f"/dev/mapper/{name}"):
+            print("解锁失败：密钥不正确，或该卷的加密方式不受 cryptsetup 支持。")
+            print("提示：48 位恢复密钥可在微软账户（account.microsoft.com 的 BitLocker 恢复密钥页）")
+            print("      或单位域管理员处查询。切勿对加密卷运行 fsck / ntfsfix。")
+            return 1
+    print("解密成功，正在挂载（优先内核 ntfs3 读写）...")
+    os.makedirs(mnt, exist_ok=True)
+    # 挂载兜底链：ntfs3 读写 -> ntfs-3g 读写 -> ntfs3 只读 -> ntfs-3g 只读。
+    # ntfs3 对脏卷/休眠卷更严格，ntfs-3g 容忍度更高；只读兜底保证至少能取数据。
+    attempts = [
+        (["mount", "-t", "ntfs3", f"/dev/mapper/{name}", mnt], "读写（ntfs3）"),
+        (["mount", "-t", "ntfs-3g", f"/dev/mapper/{name}", mnt], "读写（ntfs-3g）"),
+        (["mount", "-t", "ntfs3", "-o", "ro", f"/dev/mapper/{name}", mnt], "只读（ntfs3）"),
+        (["mount", "-t", "ntfs-3g", "-o", "ro", f"/dev/mapper/{name}", mnt], "只读（ntfs-3g）"),
+    ]
+    last_err = ""
+    for cmd, mode in attempts:
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode == 0:
+            print(f"完成：{dev} 已解锁，并以{mode}方式挂载到 {mnt}")
+            return 0
+        last_err = (r.stderr or "").strip()
+    print(f"已解密但挂载失败（{last_err}）。")
+    print("常见原因：卷未正常关机/处于休眠（快速启动）或文件系统不一致——")
+    print("请回 Windows 关机重启两次或运行 chkdsk /f 后再试；切勿在 PE 里强行修复加密卷。")
+    print(f"解密设备保留在 /dev/mapper/{name}，可手动挂载；关闭用：cryptsetup close {name}")
+    return 1
+
 def diagnose_rules(d):
     findings = []  # (level, title, detail, advice)
     # Disk space: only real, writable, non-trivial filesystems may raise
@@ -99,67 +234,88 @@ def diagnose_rules(d):
         if e["size"] < 2 * 1024**3:
             continue
         pct = e["pct"]
-        line = f"{src} {pct}% used, mounted on {mnt}"
+        line = f"{src} 已用 {pct}%，挂载于 {mnt}"
         if pct >= 95:
-            findings.append(("CRITICAL", f"Filesystem nearly full: {src} {pct}%", line, "Free space: clear logs/cache, resize, or move data. Check: du -xh / | sort -h | tail"))
+            findings.append(("CRITICAL", f"文件系统接近写满：{src}（{pct}%）", line, "腾挪空间：清理日志/缓存、扩容或迁移数据。查看占用：du -xh / | sort -h | tail"))
         elif pct >= 85:
-            findings.append(("WARN", f"Filesystem filling up: {src} {pct}%", line, "Plan cleanup before it hits 100%."))
+            findings.append(("WARN", f"文件系统空间告急：{src}（{pct}%）", line, "在写满到 100% 之前安排清理。"))
+    # BitLocker 卷：明确标注，绝不默默跳过
+    for v in d.get('bitlocker', []):
+        if v.get("mount"):
+            findings.append(("INFO", f"BitLocker 卷已解锁：{v['device']}", f"已解密并挂载于 {v['mount']}", ""))
+        elif v.get("mapper"):
+            findings.append(("INFO", f"BitLocker 卷已解密（未挂载）：{v['device']}", f"解密设备为 /dev/mapper/{v['mapper']}", "可手动挂载该设备访问内容。"))
+        else:
+            findings.append(("INFO", f"BitLocker 加密，未解锁：{v['device']}", "该卷被 BitLocker 加密，本次诊断未读取其内容，也未对其做任何修改。", "如需访问，在本机终端运行 sudo ai-debug unlock，按提示输入恢复密钥（48 位）或卷密码后即可挂载。"))
     if 'I/O error' in d['dmesg_critical'] or 'EXT4-fs error' in d['dmesg_critical']:
-        findings.append(("CRITICAL", "Kernel reports storage I/O / filesystem errors", d['dmesg_critical'][:800], "Back up data FIRST. Check SMART, cables, run fsck from rescue media (filesystem unmounted)."))
+        findings.append(("CRITICAL", "内核报告存储 I/O / 文件系统错误", d['dmesg_critical'][:800], "先备份数据。再检查 SMART、线缆，并在卸载状态下从救援介质运行 fsck。"))
     if 'panic' in d['dmesg_critical'].lower() or 'oops' in d['dmesg_critical'].lower():
-        findings.append(("CRITICAL", "Kernel panic/oops traces in dmesg", d['dmesg_critical'][:800], "Note the driver/module in the trace; test RAM with memtester/memtest86+; check recent kernel/driver changes."))
+        findings.append(("CRITICAL", "dmesg 中存在内核 panic/oops 记录", d['dmesg_critical'][:800], "记下堆栈里的驱动/模块名；用 memtester/memtest86+ 检测内存；检查最近的内核/驱动变更。"))
     if not d['dmesg_critical']:
-        findings.append(("OK", "No critical kernel errors found in dmesg scan", "", ""))
+        findings.append(("OK", "dmesg 扫描未发现严重内核错误", "", ""))
     # SMART
     if 'FAILED' in d['smart']:
-        findings.append(("CRITICAL", "SMART health FAILED on a disk", d['smart'][:600], "Replace the disk immediately after backing up. Do not run stress tests on it."))
+        findings.append(("CRITICAL", "某块磁盘 SMART 健康检查失败", d['smart'][:600], "备份后立即更换该磁盘，不要再对其做压力测试。"))
     elif 'Reallocated' in d['smart']:
-        findings.append(("INFO", "SMART attributes collected (check reallocated/pending counts manually)", d['smart'][:600], "Reallocated_Sector_Ct or Current_Pending_Sector > 0 means the disk is degrading."))
+        findings.append(("INFO", "SMART 属性已采集（请人工核对坏扇区计数）", d['smart'][:600], "Reallocated_Sector_Ct 或 Current_Pending_Sector 大于 0，表示磁盘正在劣化。"))
     # memory pressure
     mem = d['mem']
     if 'Mem:' in mem:
-        findings.append(("INFO", "Memory snapshot collected", mem.splitlines()[1] if len(mem.splitlines())>1 else mem, "If available memory is near zero with heavy swap, suspect a leak or undersized RAM; run memtester for hardware faults."))
+        findings.append(("INFO", "内存快照已采集", mem.splitlines()[1] if len(mem.splitlines())>1 else mem, "可用内存接近 0 且 swap 用量高时，怀疑内存泄漏或内存不足；硬件故障用 memtester 检测。"))
     # systemd
     if d['systemd_failed'] and '0 loaded units' not in d['systemd_failed'] and 'not running' not in d['systemd_failed']:
         # crude: lines with failed
         if 'failed' in d['systemd_failed'].lower():
-            findings.append(("WARN", "systemd has failed units", d['systemd_failed'][:600], "Inspect: systemctl status <unit>; journalctl -xeu <unit>"))
+            findings.append(("WARN", "systemd 存在失败的单元", d['systemd_failed'][:600], "查看：systemctl status <单元>；journalctl -xeu <单元>"))
     # network
     if 'default' not in d['network']:
-        findings.append(("WARN", "No default route found", "", "Check cable/Wi-Fi, DHCP (dhclient/dhcpcd), and ip route. Offline AI diagnosis still works without network."))
+        findings.append(("WARN", "未找到默认路由", "", "检查网线/Wi-Fi、DHCP 与 ip route。没有网络时离线诊断仍可使用。"))
     else:
-        findings.append(("OK", "Default route present", "", ""))
+        findings.append(("OK", "默认路由存在", "", ""))
     if not findings:
-        findings.append(("OK", "No issues matched by the rule engine", "", "Run a full SMART long test and memtester for deeper checks."))
+        findings.append(("OK", "规则引擎未匹配到问题", "", "更深的检查可运行 SMART 长测与 memtester。"))
     return findings
 
 def render(d, findings):
     lines = []
     lines.append("="*70)
-    lines.append("AI-Rescue-PE  ai-debug diagnose report")
-    lines.append(f"Time: {d['time']}  Host: {platform.node()}  Kernel: {d['uname']}")
+    lines.append("AI-Rescue-PE  ai-debug 诊断报告")
+    lines.append(f"时间：{d['time']}  主机：{platform.node()}  内核：{d['uname']}")
     lines.append("="*70)
-    lines.append("\n[Findings - rule engine]")
+    lines.append("\n[诊断结论 - 规则引擎]")
     for lvl, title, detail, advice in findings:
         lines.append(f"- [{lvl}] {title}")
         if detail:
-            lines.append(f"    evidence: {detail[:500]}")
+            lines.append(f"    证据：{detail[:500]}")
         if advice:
-            lines.append(f"    advice: {advice}")
-    lines.append("\n[System]")
+            lines.append(f"    建议：{advice}")
+    lines.append("\n[系统]")
     lines.append(d['os']); lines.append(d['uptime']); lines.append(d['cpu']); lines.append(d['mem_test_hint'])
-    lines.append("\n[Disk space]\n" + d['disk_space'])
-    lines.append("\n[Block devices]\n" + d['lsblk'] + "\n" + d['blkid'])
+    lines.append("\n[磁盘空间]\n" + d['disk_space'])
+    lines.append("\n[BitLocker 卷]")
+    if d.get('bitlocker'):
+        for v in d['bitlocker']:
+            if v.get("mount"):
+                state = f"已解锁，挂载于 {v['mount']}"
+            elif v.get("mapper"):
+                state = f"已解密（未挂载），解密设备 /dev/mapper/{v['mapper']}"
+            else:
+                state = "BitLocker 加密，未解锁"
+            lines.append(f"- {v['device']}: {state}")
+    else:
+        lines.append("（未检测到 BitLocker 卷）")
+    lines.append("\n[块设备]\n" + d['lsblk'] + "\n" + d['blkid'])
     lines.append("\n[SMART]\n" + d['smart'])
-    lines.append("\n[Network]\n" + d['network'])
-    lines.append("\n[systemd failed]\n" + d['systemd_failed'])
-    lines.append("\n[dmesg critical - tail]\n" + (d['dmesg_critical'] or "(none)"))
+    lines.append("\n[网络]\n" + d['network'])
+    lines.append("\n[systemd 失败单元]\n" + d['systemd_failed'])
+    lines.append("\n[内核严重日志（末尾）]\n" + (d['dmesg_critical'] or "(无)"))
     lines.append("\n" + "="*70)
-    lines.append("Common boot-failure checklist:")
-    lines.append(" 1. GRUB error / no bootable device -> check EFI/BIOS mode, ESP, grub reinstall from rescue")
-    lines.append(" 2. initramfs drops to shell -> check root UUID in fstab/grub.cfg vs blkid")
-    lines.append(" 3. Windows no-boot -> ntfsfix (check only), chntpw for password reset, testdisk for partition loss")
-    lines.append(" 4. Data loss -> STOP writing to the disk; image it with ddrescue first, then photorec/testdisk on the image")
+    lines.append("常见无法启动排查清单：")
+    lines.append(" 1. GRUB 报错 / 无可启动设备 -> 检查 EFI/BIOS 模式、ESP 分区，用救援环境重装 grub")
+    lines.append(" 2. initramfs 掉进 shell -> 核对 fstab/grub.cfg 中的根 UUID 与 blkid 输出")
+    lines.append(" 3. Windows 无法启动 -> ntfsfix（仅检查）、chntpw 改密码、testdisk 找回分区")
+    lines.append(" 4. BitLocker 卷 -> 先 sudo ai-debug unlock 解锁挂载，再做文件级处理；切勿直接 fsck")
+    lines.append(" 5. 数据丢失 -> 立刻停止向该盘写入；先用 ddrescue 做镜像，再在镜像上用 photorec/testdisk")
     lines.append("="*70)
     return "\n".join(lines)
 
@@ -168,11 +324,11 @@ def llm_chat(prompt):
     key = os.environ.get("AI_API_KEY", "")
     model = os.environ.get("AI_MODEL", "gpt-4o-mini")
     if not key:
-        return ("[ai-debug] No AI_API_KEY set. Configure an OpenAI-compatible endpoint first:\n"
+        return ("[ai-debug] 尚未设置 AI_API_KEY。先配置一个 OpenAI 兼容接口：\n"
                 "  export AI_API_BASE=https://api.openai.com/v1\n"
                 "  export AI_API_KEY=sk-...\n"
                 "  export AI_MODEL=gpt-4o-mini\n"
-                "Then re-run. Offline `ai-debug diagnose` works without a key.")
+                "然后重新运行。离线命令 ai-debug diagnose 不需要密钥即可使用。")
     payload = json.dumps({"model": model, "messages": [
         {"role": "system", "content": "You are a system-rescue debugging assistant inside a Linux live PE. Be concrete, give commands, warn before destructive steps."},
         {"role": "user", "content": prompt}]}).encode()
@@ -183,32 +339,32 @@ def llm_chat(prompt):
             data = json.loads(r.read().decode())
             return data["choices"][0]["message"]["content"]
     except Exception as e:
-        return f"[ai-debug] LLM request failed: {e}"
+        return f"[ai-debug] LLM 请求失败：{e}"
 
 def setup_local():
     script = r'''#!/bin/bash
 set -e
-echo "This downloads llama.cpp release + a small GGUF model (Qwen2.5-0.5B-Instruct, ~400MB) to /opt/ai-local"
-echo "Requires network. Nothing is downloaded by default in the ISO to keep it small."
+echo "将下载 llama.cpp 发行包与一个小 GGUF 模型（Qwen2.5-0.5B-Instruct，约 400MB）到 /opt/ai-local"
+echo "需要网络。ISO 默认不包含模型文件，以保持体积小巧。"
 sudo mkdir -p /opt/ai-local && cd /opt/ai-local
 if [ ! -f llama-cli ]; then
-  curl -L -o llama.zip https://github.com/ggml-org/llama.cpp/releases/download/b4380/llama-b4380-bin-ubuntu-x64.zip || { echo download failed; exit 1; }
+  curl -L -o llama.zip https://github.com/ggml-org/llama.cpp/releases/download/b4380/llama-b4380-bin-ubuntu-x64.zip || { echo 下载失败; exit 1; }
   unzip -o llama.zip; cp build/bin/llama-cli . 2>/dev/null || find . -name llama-cli -exec cp {} . \;
 fi
 if [ ! -f model.gguf ]; then
   curl -L -o model.gguf https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf
 fi
-echo "Done. Run: /opt/ai-local/llama-cli -m /opt/ai-local/model.gguf -p 'your question' -n 256"
+echo "完成。运行：/opt/ai-local/llama-cli -m /opt/ai-local/model.gguf -p '你的问题' -n 256"
 '''
     path = "/usr/local/bin/ai-debug-setup-local-model"
     try:
         with open(path, "w") as f: f.write(script)
         os.chmod(path, 0o755)
-        print(f"Wrote {path} - run it (with network) to install the local model.")
+        print(f"已写入 {path}，运行它（需联网）安装本地模型。")
     except PermissionError:
         with open("./ai-debug-setup-local-model", "w") as f: f.write(script)
         os.chmod("./ai-debug-setup-local-model", 0o755)
-        print("No permission for /usr/local/bin; wrote ./ai-debug-setup-local-model instead (run with sudo to install system-wide).")
+        print("无权写入 /usr/local/bin；已改为写入 ./ai-debug-setup-local-model（用 sudo 可安装到系统）。")
     print(script)
 
 def main():
@@ -220,11 +376,13 @@ def main():
         print(report)
         try:
             with open("/tmp/ai-report.txt", "w") as f: f.write(report)
-            print("\n[ai-debug] Report also written to /tmp/ai-report.txt")
+            print("\n[ai-debug] 报告已另存到 /tmp/ai-report.txt")
         except Exception as e:
-            print(f"[ai-debug] could not write /tmp/ai-report.txt: {e}")
+            print(f"[ai-debug] 无法写入 /tmp/ai-report.txt：{e}")
         if "--llm" in sys.argv:
-            print("\n[LLM analysis]\n" + llm_chat("Diagnose this rescue report and give prioritised fix steps:\n" + report[:8000]))
+            print("\n[LLM 分析]\n" + llm_chat("Diagnose this rescue report and give prioritised fix steps:\n" + report[:8000]))
+    elif cmd == "unlock":
+        sys.exit(cmd_unlock(sys.argv[2:]))
     elif cmd == "ask":
         q = " ".join(sys.argv[2:]) or "How do I check disk health?"
         print(llm_chat(q))

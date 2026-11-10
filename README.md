@@ -145,6 +145,74 @@ drivers-backup / drivers-restore 动作、fixboot 的 BCD 备份步骤。
   在 e1000 与 rtl8139 两种模拟网卡下均识别接口并 DHCP 拿址。
 - USB 键鼠：QEMU 默认 USB 输入下可操作 PE 桌面/终端（记通过）。
 
+## v3 更新（2026-11-10，三项）
+
+### 1) BitLocker 解锁（64 位与 32 位版均带）
+
+- `ai-debug unlock [设备]`：列出检测到的 BitLocker 卷 → 操作者在本机
+  终端输入恢复密钥（48 位数字）或卷密码 → cryptsetup（bitlk 类型）
+  解锁 → 挂载到 `/mnt/bitlocker-<分区>`。64 位版挂载顺序：内核
+  ntfs3 读写 → ntfs-3g 读写 → ntfs3 只读 → ntfs-3g 只读；32 位版因
+  bookworm i386 内核未编入 ntfs3，走 ntfs-3g 读写。dislocker 作为
+  备用工具一并装入（主路径未用到）。
+- **密钥纪律**：恢复密钥/密码只在运行时从本机终端读入（交给
+  cryptsetup 的交互提示），不落盘、不进日志、不进 agent 的 HTTP
+  接口、不写进任何报告。
+- diagnose 明确标注 BitLocker 卷：未解锁输出「BitLocker 加密，
+  未解锁」，解锁后输出已解锁与挂载点，不再默默跳过。检测含整盘
+  （无分区）BitLocker 卷与解锁后的状态变化。
+- 验证级别（QEMU，如实）：cryptsetup 官方测试镜像
+  （aes-xts-128 / aes-xts-256 / aes-cbc-256）均可正确解密、blkid
+  识别为 NTFS 且 UUID 与测试向量一致；但官方镜像的 NTFS 本身不
+  一致（$MFTMirr 损坏），任何 Linux NTFS 驱动都无法挂载，因此
+  挂载段以「真实解密 + 一致 NTFS 镜像代演解密后设备状态」验证
+  unlock 后半程：64 位 ntfs3 读写挂载与写读往返通过、32 位
+  ntfs-3g 读写挂载与写读往返通过、diagnose 已解锁标注通过。
+  真实 Windows BitLocker 卷的完整端到端（真卷解密并挂载）未在
+  本次验证覆盖，首次真机使用即为真验；解锁后若 NTFS 处于休眠/
+  不一致状态，unlock 会保留解密设备并给出回 Windows 运行
+  chkdsk /f 的指引，不强行修复加密卷。
+
+### 2) 32 位 i686 精简兜底版（AI-Rescue-PE-32.iso）
+
+- 基底为 Debian 12 bookworm i386（Debian 13 已取消 i386 内核），
+  内核 6.1 686-pae，以 Legacy BIOS 为主。功能只保留：联网
+  （e1000/rtl8139 等老网卡）、diagnose、cleanup、只读 panel、
+  BitLocker 解锁；不做 fixboot 深修。
+- 体积 234,252,288 字节（约 223 MB）；QEMU 以 pentium3 + 768 MB
+  内存验证：rtl8139 与 e1000 均 DHCP 拿址、agent 上线、
+  /health 200、无令牌 401、diagnose 退出码 0 且为中文输出。
+
+### 3) 本机输出全中文
+
+- ai-debug 输出、开机横幅、agent 控制台信息全部中文（技术名词/
+  路径/命令名保留英文）；错误提示同样中文。
+- 本机 tty 汉字显示走 fbterm + 子集化字体（Noto Sans CJK SC 按
+  GB2312 常用字子集化，约 1.5 MB）：tty1 自动登录后由 .profile
+  钩子进入 fbterm。构建中顺带修复了两个潜伏问题（v1 起即在）：
+  ① tty1 会话实际未稳定建立（live-config 的 autologin drop-in
+  依赖不可靠）→ 构建显式装入 getty@tty1 autologin drop-in；
+  ② rescue 用户不在 video 组、打不开 /dev/fb0，fbterm 秒退、
+  本机控制台黑屏/菱形乱码 → drop-in 以 ExecStartPre 在每次登录
+  前把 rescue 加入 video 组。
+- QEMU 验证：ISO 直启后 tty1 的 fbterm 会话驻留，截屏可见
+  fbterm 渲染的中文横幅与 diagnose 中文输出（fbcon 下则只会显示
+  菱形替代字形——这正是需要 fbterm 的原因）。网页 panel 与报告
+  文件中的中文一直正常，不受 tty 影响。
+
+### v3 产物（/data/home/dist-v3/）
+
+| 文件 | 字节 | sha256 |
+|---|---|---|
+| AI-Rescue-PE.iso | 397,410,304 | `36994bb5fa36ae3131c4d29d5ed3a9c563e3f8d136fbff757ff831ee18c40587` |
+| AI-Rescue-PE-32.iso | 234,252,288 | `8e8c1d883935aed18c79c922a5bb31e7b4390e754b3450c743340bf6497b2726` |
+| HotPE-Fusion-AIRescue.iso | 1,109,088,256 | `82a80d15f82e41d641d3c2a0bdf02a659dc431bd2d9c97b5df00d0fc220bbf56`（与 dist-v2 原文件相同，未改） |
+| Ventoy-AI-Rescue-USB.img | 2,147,483,648 | `8d4d0f4fa27b397faae4575302c074960d7942d0f0f9744193e463582a566db0` |
+
+Ventoy 镜像为 Ventoy 1.1.18 基座 + 上述两个 Linux ISO + 融合
+ISO（dist-v2 原文件）+ ventoy.json（含 32 位条目）。Secure Boot
+提醒沿用前文：需关闭 Secure Boot 或注册 Ventoy 密钥。
+
 ## 产物清单
 
 见 `dist/MANIFEST.md`（名称/大小/sha256/存放位置）。

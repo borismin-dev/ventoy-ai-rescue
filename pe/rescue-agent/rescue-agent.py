@@ -99,9 +99,9 @@ def load_config():
                 for k, v in env.items():
                     f.write(f"{k}={v}\n")
             os.chmod(CONF_ENV_PATH, 0o600)
-            print(f"[rescue-agent] loaded config from {path}: keys={sorted(env.keys())}", flush=True)
+            print(f"[rescue-agent] 已从 {path} 加载配置：keys={sorted(env.keys())}", flush=True)
         except Exception as e:
-            print(f"[rescue-agent] config load failed: {e}", flush=True)
+            print(f"[rescue-agent] 配置加载失败：{e}", flush=True)
     # process environment (systemd EnvironmentFile etc.) also counts
     for k in ("AI_API_BASE", "AI_API_KEY", "AI_MODEL"):
         if k in os.environ and k not in env:
@@ -212,7 +212,7 @@ def sys_info():
         "llm_model": CONFIG.get("AI_MODEL") if CONFIG.get("AI_API_KEY") else None,
         "tunnel": tunnel,
         "api_port": PORT,
-        "ssh": "ssh rescue@ai-rescue.local  (password = boot token shown on console)",
+        "ssh": "ssh rescue@ai-rescue.local（密码 = 本机控制台横幅上的开机令牌）",
     }
 
 # ---------- v2 item 9: read-only status panel ----------
@@ -446,9 +446,9 @@ def main():
     global CONFIG
     CONFIG = load_config()
     get_token()
-    src = "fixed (agent.conf)" if len((CONFIG.get("RESCUE_TOKEN") or "").strip()) >= 8 else "random (per boot)"
-    print(f"[rescue-agent] token source: {src}", flush=True)
-    print(f"[rescue-agent] listening on 0.0.0.0:{PORT} (token on console banner only)", flush=True)
+    src = "固定（agent.conf）" if len((CONFIG.get("RESCUE_TOKEN") or "").strip()) >= 8 else "随机（每次开机生成）"
+    print(f"[rescue-agent] 令牌来源：{src}", flush=True)
+    print(f"[rescue-agent] 正在监听 0.0.0.0:{PORT}（令牌仅显示在本机控制台横幅上）", flush=True)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
 
 if __name__ == "__main__":

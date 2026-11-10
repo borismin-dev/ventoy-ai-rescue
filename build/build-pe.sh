@@ -13,7 +13,7 @@ OUT=${OUT:-/data/home/dist/AI-Rescue-PE.iso}
 SRC=${SRC:-/data/home/build/files}   # ai-debug, rescue-agent.py, rescue-boot.sh, units live here
 mkdir -p "$WORK" "$ISO_DIR/live" "$ISO_DIR/boot/grub"
 
-PACKAGES="live-boot,systemd-sysv,linux-image-amd64,firmware-linux-free,parted,gparted,testdisk,gddrescue,smartmontools,ntfs-3g,chntpw,memtester,rsync,curl,openssh-client,openssh-server,python3,util-linux,fdisk,iproute2,iputils-ping,net-tools,wget,less,vim-tiny,nano,file,usbutils,pciutils,hdparm,lvm2,mdadm,cryptsetup-bin,e2fsprogs,xfsprogs,btrfs-progs,dosfstools,exfatprogs,sshfs,ca-certificates,bash-completion,locales,console-setup,keyboard-configuration,sudo,psmisc,avahi-daemon,libnss-mdns,dbus,qrencode,jq,isc-dhcp-client"
+PACKAGES="live-boot,systemd-sysv,linux-image-amd64,firmware-linux-free,parted,gparted,testdisk,gddrescue,smartmontools,ntfs-3g,chntpw,memtester,rsync,curl,openssh-client,openssh-server,python3,util-linux,fdisk,iproute2,iputils-ping,net-tools,wget,less,vim-tiny,nano,file,usbutils,pciutils,hdparm,lvm2,mdadm,cryptsetup-bin,dislocker,e2fsprogs,xfsprogs,btrfs-progs,dosfstools,exfatprogs,sshfs,ca-certificates,bash-completion,locales,console-setup,keyboard-configuration,sudo,psmisc,avahi-daemon,libnss-mdns,dbus,qrencode,jq,isc-dhcp-client,fbterm,fontconfig"
 
 if [ "${CLEAN:-0}" = "1" ]; then rm -rf "$ROOTFS"; fi
 if [ ! -d "$ROOTFS/boot" ]; then
@@ -22,6 +22,10 @@ if [ ! -d "$ROOTFS/boot" ]; then
 fi
 
 echo "[pe] configure rootfs"
+# v3: when reusing an older rootfs, make sure the v3 packages are present
+if [ -d "$ROOTFS/boot" ]; then
+  chroot "$ROOTFS" bash -c 'export DEBIAN_FRONTEND=noninteractive; dpkg -s dislocker fbterm fontconfig >/dev/null 2>&1 || { apt-get update && apt-get install -y dislocker fbterm fontconfig; }' || echo "[pe] WARN: v3 package ensure failed (continuing)"
+fi
 # hostname is FIXED to ai-rescue so mDNS publishes ai-rescue.local
 echo "ai-rescue" > "$ROOTFS/etc/hostname"
 # initial user rescue / password rescue — REPLACED at every boot by the random
@@ -42,6 +46,10 @@ install -m 0644 "$SRC/rescue-setup.service" "$ROOTFS/etc/systemd/system/rescue-s
 install -m 0644 "$SRC/10-wired-dhcp.network" "$ROOTFS/etc/systemd/network/10-wired-dhcp.network"
 mkdir -p "$ROOTFS/opt/rescue-config-example"
 [ -f "$SRC/agent.conf.example" ] && install -m 0644 "$SRC/agent.conf.example" "$ROOTFS/opt/rescue-config-example/agent.conf.example"
+
+# NOTE: the getty@tty1 autologin drop-in is written ONCE, further below
+# ("console autologin on tty1" section) — do not add a second writer
+# here; a duplicated block once silently overwrote the v3 usermod fix.
 
 # --- enable services (symlinks; systemctl enable also works in chroot) ---
 W="$ROOTFS/etc/systemd/system/multi-user.target.wants"
@@ -64,9 +72,18 @@ ln -sf /lib/systemd/system/avahi-daemon.service "$W/avahi-daemon.service" || tru
 mkdir -p "$ROOTFS/etc/systemd/system/dbus-org.freedesktop.Avahi.service.d" || true
 
 # --- console autologin on tty1 (user is physically present at the machine) ---
+# v3: ExecStartPre adds rescue to the video group before every agetty
+# (re)start. live-config creates rescue with only its own + sudo groups,
+# but /dev/fb0 is root:video 0660 — without video the .profile fbterm
+# exec cannot open the framebuffer, the tty1 session dies instantly in
+# a restart loop and the local console stays black/garbled (verified in
+# QEMU). The leading '-' ignores the first-boot race where live-config
+# has not created the user yet; the login after agetty picks the group
+# up at session creation.
 mkdir -p "$ROOTFS/etc/systemd/system/getty@tty1.service.d"
 cat > "$ROOTFS/etc/systemd/system/getty@tty1.service.d/autologin.conf" <<'EOF'
 [Service]
+ExecStartPre=-/usr/sbin/usermod -aG video rescue
 ExecStart=
 ExecStart=-/sbin/agetty --autologin rescue --noclear %I $TERM
 EOF
@@ -95,26 +112,56 @@ if grep -q '^hosts:' "$ROOTFS/etc/nsswitch.conf" 2>/dev/null && ! grep -q mdns "
   sed -i 's/^hosts:.*/hosts: files mdns4_minimal [NOTFOUND=return] dns/' "$ROOTFS/etc/nsswitch.conf"
 fi
 
+# --- v3: 中文语言环境 + 子集字体 + fbterm（tty 汉字显示） ---
+# locale: 生成 zh_CN.UTF-8 并设为默认（程序自身的英文消息不受影响）
+chroot "$ROOTFS" bash -c 'sed -i "s/^# *zh_CN.UTF-8 UTF-8/zh_CN.UTF-8 UTF-8/" /etc/locale.gen 2>/dev/null; locale-gen zh_CN.UTF-8 >/dev/null 2>&1' || true
+printf 'LANG=zh_CN.UTF-8\n' > "$ROOTFS/etc/default/locale"
+# 子集中文字体（构建机上用 fonttools 从 Noto Sans CJK 按 GB2312 字符集子集化，
+# 约 1-2 MB；整套 Noto CJK 太大不进 ISO）。字体文件放在 $SRC 旁的 fonts/ 目录。
+if [ -f "$SRC/fonts/NotoSansSC-Subset.ttf" ]; then
+  install -D -m 0644 "$SRC/fonts/NotoSansSC-Subset.ttf" "$ROOTFS/usr/share/fonts/truetype/rescue/NotoSansSC-Subset.ttf"
+  chroot "$ROOTFS" fc-cache -f >/dev/null 2>&1 || true
+fi
+# rescue 用户登录钩子：tty1 + 有帧缓冲时进 fbterm（汉字可正常显示），
+# 并在 fbterm 内显示一次开机横幅（横幅含令牌与二维码）。
+mkdir -p "$ROOTFS/home/rescue"
+cat > "$ROOTFS/home/rescue/.profile" <<'EOF'
+# AI-Rescue-PE 登录钩子（构建时写入）
+if [ "$TERM" = "fbterm" ] && [ -z "$RESCUE_BANNER_SHOWN" ]; then
+  export RESCUE_BANNER_SHOWN=1
+  for i in $(seq 1 30); do [ -s /run/rescue-banner.txt ] && break; sleep 1; done
+  [ -s /run/rescue-banner.txt ] && cat /run/rescue-banner.txt
+fi
+if [ "$(tty 2>/dev/null)" = "/dev/tty1" ] && [ -e /dev/fb0 ] && [ "$TERM" != "fbterm" ] && command -v fbterm >/dev/null 2>&1; then
+  exec fbterm -- bash -l
+fi
+EOF
+cat > "$ROOTFS/home/rescue/.fbtermrc" <<'EOF'
+font-size=16
+EOF
+chroot "$ROOTFS" chown -R rescue:rescue /home/rescue || true
+
 # --- motd ---
 cat > "$ROOTFS/etc/motd" <<'EOF'
 ================================================================
- AI-Rescue-PE  (Linux Live rescue environment, not Microsoft WinPE)
- Hostname: ai-rescue  (mDNS: ai-rescue.local) - auto DHCP, auto login
- A maintenance agent API starts automatically on port 8734.
- The per-boot TOKEN on the boot banner is the API token AND the
- SSH password for user "rescue" (sudo password = same token).
+ AI-Rescue-PE（Linux Live 救援环境，不是微软 WinPE）
+ 主机名：ai-rescue（mDNS：ai-rescue.local）- 自动 DHCP、自动登录
+ 维护智能体 API 开机自动在 8734 端口启动。
+ 开机横幅上的令牌（TOKEN）就是 API 令牌，也是 rescue 用户的
+ SSH 密码（sudo 密码相同）。
 
- Agent API (from another agent on the LAN):
+ 智能体 API（局域网内其他智能体调用）：
    curl http://ai-rescue.local:8734/health
-   curl -H "X-Rescue-Token: <TOKEN>" http://ai-rescue.local:8734/diagnose
+   curl -H "X-Rescue-Token: <令牌>" http://ai-rescue.local:8734/diagnose
    ssh rescue@ai-rescue.local
- Local AI debugging:
-   ai-debug diagnose            offline diagnosis -> /tmp/ai-report.txt
-   ai-debug diagnose --llm      + LLM (needs AI_API_KEY via rescue-config)
-   ai-debug ask "question"      ask the LLM (OpenAI-compatible API)
-   ai-debug setup-local-model   optional local llama.cpp + small GGUF
- Plug-and-play config: put rescue-config/agent.conf in the root of
- the Ventoy USB data partition (LLM settings, reverse-tunnel relay).
+ 本机 AI 调试：
+   ai-debug diagnose            离线诊断 -> /tmp/ai-report.txt
+   ai-debug diagnose --llm      + LLM 总结（需在 rescue-config 里配 AI_API_KEY）
+   ai-debug unlock              解锁 BitLocker 加密卷（交互输入恢复密钥）
+   ai-debug ask "问题"          向 LLM 提问（OpenAI 兼容接口）
+   ai-debug setup-local-model   可选：本地 llama.cpp + 小 GGUF 模型
+ 即插即用配置：把 rescue-config/agent.conf 放在 Ventoy U 盘数据
+ 分区根目录（LLM 设置、反向隧道中继）。
 ================================================================
 EOF
 
@@ -136,11 +183,11 @@ cat > "$ISO_DIR/boot/grub/grub.cfg" <<'EOF'
 set default=0
 set timeout=10
 insmod all_video
-menuentry "AI-Rescue-PE (Linux Live Rescue + ai-debug + rescue-agent)" {
+menuentry "AI-Rescue-PE（Linux 救援系统 + ai-debug + rescue-agent）" {
   linux /live/vmlinuz boot=live components quiet username=rescue hostname=ai-rescue
   initrd /live/initrd.img
 }
-menuentry "AI-Rescue-PE (safe graphics / nomodeset)" {
+menuentry "AI-Rescue-PE（安全图形模式 / nomodeset）" {
   linux /live/vmlinuz boot=live components nomodeset username=rescue hostname=ai-rescue
   initrd /live/initrd.img
 }

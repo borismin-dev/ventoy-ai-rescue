@@ -12,7 +12,7 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 TOKEN_FILE=/run/rescue-token
 for i in $(seq 1 30); do [ -s "$TOKEN_FILE" ] && break; sleep 1; done
 TOKEN=$(cat "$TOKEN_FILE" 2>/dev/null)
-[ -n "$TOKEN" ] || { echo "[rescue-boot] no token file, aborting"; exit 1; }
+[ -n "$TOKEN" ] || { echo "[rescue-boot] 找不到令牌文件，中止"; exit 1; }
 
 # SSH password = boot token (previous fixed password is replaced every boot)
 echo "rescue:${TOKEN}" | chpasswd
@@ -25,10 +25,10 @@ for i in $(seq 1 20); do
   [ -n "$IPLIST" ] && break
   sleep 2
 done
-[ -z "$IPLIST" ] && IPLIST="(no IPv4 yet - check cable / DHCP)"
+[ -z "$IPLIST" ] && IPLIST="（尚无 IPv4 - 检查网线 / DHCP）"
 
 # ---- optional outbound reverse tunnel (user's own relay from agent.conf) ----
-TUNNEL_STATUS="off (LAN only - no TUNNEL_HOST in rescue-config/agent.conf)"
+TUNNEL_STATUS="关闭（仅局域网 - agent.conf 未配 TUNNEL_HOST）"
 # shellcheck disable=SC1091
 [ -f /run/rescue-config.env ] && . /run/rescue-config.env
 if [ -n "${TUNNEL_HOST:-}" ]; then
@@ -52,9 +52,9 @@ if [ -n "${TUNNEL_HOST:-}" ]; then
     "${TUSER}@${TUNNEL_HOST}" > /run/tunnel.log 2>&1 &
   sleep 3
   if kill -0 $! 2>/dev/null; then
-    TUNNEL_STATUS="on -> ${TUSER}@${TUNNEL_HOST}:${TPORT} (api :${RAPI}, ssh :${RSSH} on relay)"
+    TUNNEL_STATUS="已建立 -> ${TUSER}@${TUNNEL_HOST}:${TPORT}（中继上 api :${RAPI}、ssh :${RSSH}）"
   else
-    TUNNEL_STATUS="FAILED to ${TUNNEL_HOST} - see /run/tunnel.log (LAN access still works)"
+    TUNNEL_STATUS="连接 ${TUNNEL_HOST} 失败 - 见 /run/tunnel.log（局域网访问不受影响）"
   fi
 fi
 echo "$TUNNEL_STATUS" > /run/tunnel.status
@@ -71,18 +71,18 @@ fi
 {
   echo ""
   echo "================================================================"
-  echo "   AI-Rescue-PE  -  ready for maintenance agents"
+  echo "   AI-Rescue-PE  -  维护智能体已就绪"
   echo "================================================================"
-  echo "  Host (mDNS) : ai-rescue.local        (hostname: ai-rescue)"
-  echo "  Interfaces  : ${IPLIST}"
-  echo "  Agent API   : http://ai-rescue.local:8734   (/health /info /diagnose /exec)"
-  echo "  SSH         : ssh rescue@ai-rescue.local"
-  echo "  TOKEN       : ${TOKEN}"
-  echo "  SSH password: (the TOKEN above - changes every boot)"
-  echo "  Tunnel      : ${TUNNEL_STATUS}"
-  echo "  Offline diag: ai-debug diagnose"
+  echo "  主机（mDNS）：ai-rescue.local        （主机名：ai-rescue）"
+  echo "  网卡地址    ：${IPLIST}"
+  echo "  智能体 API  ：http://ai-rescue.local:8734   (/health /info /diagnose /exec)"
+  echo "  SSH         ：ssh rescue@ai-rescue.local"
+  echo "  令牌 TOKEN  ：${TOKEN}"
+  echo "  SSH 密码    ：（即上面的令牌 - 每次开机更换）"
+  echo "  反向隧道    ：${TUNNEL_STATUS}"
+  echo "  离线诊断    ：ai-debug diagnose"
   echo "----------------------------------------------------------------"
-  echo "  Scan to connect:"
+  echo "  扫码连接："
   qrencode -t ANSIUTF8 -s 1 "$CONNECT_URL" 2>/dev/null || echo "  $CONNECT_URL"
   echo "  $CONNECT_URL"
   echo "================================================================"
@@ -95,4 +95,4 @@ for tty in /dev/console /dev/tty1 /dev/ttyS0; do
   [ -w "$tty" ] && cat /run/rescue-banner.txt > "$tty" 2>/dev/null
 done
 cp /run/rescue-banner.txt /etc/issue 2>/dev/null || true
-echo "[rescue-boot] banner printed; tunnel: ${TUNNEL_STATUS}"
+echo "[rescue-boot] 横幅已打印；隧道：${TUNNEL_STATUS}"
