@@ -11,9 +11,18 @@
 #define _WIN32_WINNT 0x0A00
 #define WIN32_LEAN_AND_MEAN
 #define COBJMACROS
+#define UNICODE
+#define _UNICODE
 #include <windows.h>
 #include <ole2.h>
+#include <shellapi.h>
 #include <exdisp.h>
+#ifndef DISPID_ONQUIT
+#define DISPID_ONQUIT 253
+#endif
+#ifndef DISPID_DOCUMENTCOMPLETE
+#define DISPID_DOCUMENTCOMPLETE 259
+#endif
 #include <mshtmhst.h>
 #include <mshtml.h>
 #include <urlmon.h>
@@ -242,7 +251,7 @@ static HRESULT STDMETHODCALLTYPE IP_GetWindowContext(IOleInPlaceSite *This, IOle
     *ppDoc = NULL;
     GetClientRect(s->hwnd, lprcPosRect);
     *lprcClipRect = *lprcPosRect;
-    lpFrameInfo->cbStruct = sizeof(OLEINPLACEFRAMEINFO);
+    lpFrameInfo->cb = sizeof(OLEINPLACEFRAMEINFO); /* mingw names the field cb (MS: cbStruct) */
     lpFrameInfo->fMDIApp = FALSE;
     lpFrameInfo->hwndFrame = s->hwnd;
     lpFrameInfo->haccel = NULL;
@@ -621,17 +630,18 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
     CoInternetSetFeatureEnabled(FEATURE_LOCALMACHINE_LOCKDOWN, SET_FEATURE_ON_PROCESS, FALSE);
     CoInternetSetFeatureEnabled(FEATURE_ZONE_ELEVATION, SET_FEATURE_ON_PROCESS, FALSE);
 
-    WNDCLASSW wc;
+    WNDCLASSEXW wc;
     ZeroMemory(&wc, sizeof(wc));
+    wc.cbSize = sizeof(wc);
     wc.style = CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInst;
     wc.hIcon = LoadIconW(hInst, MAKEINTRESOURCEW(1));
     wc.hIconSm = LoadIconW(hInst, MAKEINTRESOURCEW(1));
-    wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
+    wc.hCursor = LoadCursorW(NULL, MAKEINTRESOURCEW(32512)); /* IDC_ARROW */
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     wc.lpszClassName = L"SGPanelWndClass";
-    RegisterClassW(&wc);
+    RegisterClassExW(&wc);
 
     /* 620x800 client area, centered. */
     RECT want = { 0, 0, 620, 800 };
