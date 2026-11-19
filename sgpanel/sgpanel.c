@@ -50,11 +50,11 @@ static ULONG STDMETHODCALLTYPE Sec_Release(IInternetSecurityManager *This) {
     if (r == 0) free(This);
     return (ULONG)r;
 }
-static HRESULT STDMETHODCALLTYPE Sec_SetSecuritySite(IInternetSecurityManager *This, IInternetSecuritySite *pSite) {
+static HRESULT STDMETHODCALLTYPE Sec_SetSecuritySite(IInternetSecurityManager *This, IInternetSecurityMgrSite *pSite) {
     (void)This; (void)pSite;
     return S_OK;
 }
-static HRESULT STDMETHODCALLTYPE Sec_GetSecuritySite(IInternetSecurityManager *This, IInternetSecuritySite **ppSite) {
+static HRESULT STDMETHODCALLTYPE Sec_GetSecuritySite(IInternetSecurityManager *This, IInternetSecurityMgrSite **ppSite) {
     (void)This;
     *ppSite = NULL;
     return E_NOTIMPL;
@@ -122,6 +122,7 @@ static HRESULT STDMETHODCALLTYPE Frame_ContextSensitiveHelp(IOleInPlaceFrame *Th
 static HRESULT STDMETHODCALLTYPE Frame_GetBorder(IOleInPlaceFrame *This, LPRECT lprectBorder);
 static HRESULT STDMETHODCALLTYPE Frame_RequestBorderSpace(IOleInPlaceFrame *This, LPCBORDERWIDTHS pborderwidths);
 static HRESULT STDMETHODCALLTYPE Frame_SetBorderSpace(IOleInPlaceFrame *This, LPCBORDERWIDTHS pborderwidths);
+static HRESULT STDMETHODCALLTYPE Frame_SetActiveObject(IOleInPlaceFrame *This, IOleInPlaceActiveObject *pActiveObject, LPCOLESTR pszObjName);
 static HRESULT STDMETHODCALLTYPE Frame_InsertMenus(IOleInPlaceFrame *This, HMENU hmenuShared, LPOLEMENUGROUPWIDTHS lpMenuWidths);
 static HRESULT STDMETHODCALLTYPE Frame_SetMenu(IOleInPlaceFrame *This, HMENU hmenuShared, HOLEMENU holemenu, HWND hwndActiveObject);
 static HRESULT STDMETHODCALLTYPE Frame_RemoveMenus(IOleInPlaceFrame *This, HMENU hmenuShared);
@@ -133,6 +134,7 @@ static IOleInPlaceFrameVtbl g_frameVtbl = {
     Frame_QueryInterface, Frame_AddRef, Frame_Release,
     Frame_GetWindow, Frame_ContextSensitiveHelp,
     Frame_GetBorder, Frame_RequestBorderSpace, Frame_SetBorderSpace,
+    Frame_SetActiveObject,
     Frame_InsertMenus, Frame_SetMenu, Frame_RemoveMenus,
     Frame_SetStatusText, Frame_EnableModeless, Frame_TranslateAccelerator
 };
@@ -308,6 +310,15 @@ static HRESULT STDMETHODCALLTYPE Frame_RequestBorderSpace(IOleInPlaceFrame *This
 }
 static HRESULT STDMETHODCALLTYPE Frame_SetBorderSpace(IOleInPlaceFrame *This, LPCBORDERWIDTHS pborderwidths) {
     (void)This; (void)pborderwidths;
+    return S_OK;
+}
+static HRESULT STDMETHODCALLTYPE Frame_SetActiveObject(IOleInPlaceFrame *This, IOleInPlaceActiveObject *pActiveObject, LPCOLESTR pszObjName) {
+    (void)This; (void)pszObjName;
+    if (g_activeObj) { IOleInPlaceActiveObject_Release(g_activeObj); g_activeObj = NULL; }
+    if (pActiveObject) {
+        g_activeObj = pActiveObject;
+        IOleInPlaceActiveObject_AddRef(g_activeObj);
+    }
     return S_OK;
 }
 static HRESULT STDMETHODCALLTYPE Frame_InsertMenus(IOleInPlaceFrame *This, HMENU hmenuShared, LPOLEMENUGROUPWIDTHS lpMenuWidths) {
@@ -668,8 +679,10 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
     ResizeBrowser();
     IWebBrowser2_put_Visible(g_browser, VARIANT_TRUE);
 
-    if (SUCCEEDED(IOleObject_QueryInterface(g_oleObj, &IID_IOleInPlaceActiveObject, (void **)&g_activeObj))) {
-        /* keep for TranslateAccelerator in the message loop */
+    if (!g_activeObj) {
+        /* Fallback for TranslateAccelerator if the frame's SetActiveObject
+           was not called during activation. */
+        IOleObject_QueryInterface(g_oleObj, &IID_IOleInPlaceActiveObject, (void **)&g_activeObj);
     }
 
     /* Events: catch window.close() from the page. */
